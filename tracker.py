@@ -232,12 +232,13 @@ class Dashboard:
         hdr = tk.Frame(r, bg=self.PANEL, pady=4)
         hdr.pack(fill="x", padx=6, pady=(6, 0))
         for text, w, anchor in [
-            ("Match",        36, "w"),
-            ("Score",         8, "center"),
-            ("Live odds",    13, "center"),
-            ("Win chance",   12, "center"),
-            ("vs Baseline",  14, "center"),
-            ("Signal",       10, "center"),
+            ("Match",        30, "w"),
+            ("Score",         7, "center"),
+            ("Live odds",    12, "center"),
+            ("Win %",         9, "center"),
+            ("Drop",          8, "center"),
+            ("Speed",         9, "center"),
+            ("Tier",         10, "center"),
         ]:
             tk.Label(hdr, text=text, bg=self.PANEL, fg=self.GREY_C,
                      font=("Segoe UI", 9, "bold"),
@@ -380,6 +381,21 @@ class Dashboard:
                    self._sv_cooldown, 10, 120, lambda v: f"{v:.0f}s",
                    lambda v: self._set("ALERT_COOLDOWN_SEC", v))
 
+        self._sv_watch_vel = tk.DoubleVar(value=WATCH_VEL_PPM)
+        slider_row(sw, "WATCH velocity (pp/min)",
+                   self._sv_watch_vel, 1, 15, lambda v: f"{v:.1f}",
+                   lambda v: self._set("WATCH_VEL_PPM", v))
+
+        self._sv_attack_vel = tk.DoubleVar(value=ATTACK_VEL_PPM)
+        slider_row(sw, "ATTACK velocity (pp/min)",
+                   self._sv_attack_vel, 3, 20, lambda v: f"{v:.1f}",
+                   lambda v: self._set("ATTACK_VEL_PPM", v))
+
+        self._sv_lock = tk.DoubleVar(value=ATTACK_LOCK_SEC)
+        slider_row(sw, "Lock-on duration (seconds)",
+                   self._sv_lock, 10, 60, lambda v: f"{v:.0f}s",
+                   lambda v: self._set("ATTACK_LOCK_SEC", v))
+
         # ── Scroll ────────────────────────────────────────────────────────────
         section("SCROLL")
 
@@ -462,36 +478,48 @@ class Dashboard:
             worst  = max(d1, d2)
             mid    = m.get("mid_match", False)
 
-            if mid:
-                row_bg, sig_text, sig_color = "#1a1a1a", "⚫ Mid", self.GREY_C
-            elif worst >= DELTA_THRESHOLD_PCT:
-                row_bg, sig_text, sig_color = "#2d0a0a", "🔴 BET", self.RED_C
-            elif worst >= DELTA_THRESHOLD_PCT * 0.5:
-                row_bg, sig_text, sig_color = "#1f1a00", "🟡 Watch", self.YELLOW_C
+            tier = m.get("tier", "NORMAL")
+            mid  = m.get("mid_match", False)
+
+            if tier == "ATTACK":
+                row_bg, tier_text, tier_color = "#2d0a0a", "🔴 ATTACK", self.RED_C
+            elif tier == "WATCH":
+                row_bg, tier_text, tier_color = "#1f1a00", "🟡 WATCH",  self.YELLOW_C
+            elif mid:
+                row_bg, tier_text, tier_color = "#111111", "⚫ Mid",    self.GREY_C
             else:
                 row_bg = self.PANEL if idx % 2 == 0 else self.BG
-                sig_text, sig_color = "🟢", self.GREEN_C
+                tier_text, tier_color = "🟢", self.GREEN_C
 
             def fmt_odds(o): return f"+{o}" if o > 0 else str(o)
 
-            prob_str  = f"{m['p1_prob']:.0f}% / {m['p2_prob']:.0f}%"
-            delta_str = f"▼{worst:.1f}pp" if worst > 0.5 else "stable"
-            delta_col = (self.RED_C if worst >= DELTA_THRESHOLD_PCT
+            worst = max(m["d1"], m["d2"])
+            vel   = m.get("velocity", 0.0)
+
+            drop_str  = f"▼{worst:.1f}pp" if worst > 0.5 else "—"
+            drop_col  = (self.RED_C    if worst >= DELTA_THRESHOLD_PCT
                          else self.YELLOW_C if worst >= 6
-                         else self.GREEN_C)
+                         else self.WHITE)
+            vel_str   = f"{vel:+.1f}/m" if abs(vel) > 0.2 else "—"
+            vel_col   = (self.RED_C    if vel >= ATTACK_VEL_PPM
+                         else self.YELLOW_C if vel >= WATCH_VEL_PPM
+                         else self.WHITE)
+            prob_str  = f"{m['p1_prob']:.0f}/{m['p2_prob']:.0f}%"
+
             cells = [
-                (f"{m['p1']} vs {m['p2']}", 36, "w",      self.WHITE),
-                (m.get("sets", "?-?"),        8, "center", self.GREY_C),
-                (f"{fmt_odds(m['p1_odds'])} / {fmt_odds(m['p2_odds'])}",
-                                             13, "center", self.WHITE),
-                (prob_str,                   12, "center", self.WHITE),
-                (delta_str,                  14, "center", delta_col),
-                (sig_text,                   10, "center", sig_color),
+                (f"{m['p1']} vs {m['p2']}", 30, "w",      self.WHITE),
+                (m.get("sets", "?-?"),        7, "center", self.GREY_C),
+                (f"{fmt_odds(m['p1_odds'])}/{fmt_odds(m['p2_odds'])}",
+                                             12, "center", self.WHITE),
+                (prob_str,                    9, "center", self.WHITE),
+                (drop_str,                    8, "center", drop_col),
+                (vel_str,                     9, "center", vel_col),
+                (tier_text,                  10, "center", tier_color),
             ]
 
             if key in self._row_widgets:
-                widgets = self._row_widgets[key]
-                frame = widgets[0]
+                widgets  = self._row_widgets[key]
+                frame    = widgets[0]
                 frame.configure(bg=row_bg)
                 for label, (text, _, _, fg) in zip(widgets[1:], cells):
                     label.config(text=text, fg=fg, bg=row_bg)
@@ -906,13 +934,84 @@ def fire_alert(match_key: str, player: str, delta: float,
 
 
 # =============================================================================
+#  VELOCITY + TIER LOGIC
+# =============================================================================
+
+WATCH_DELTA_PP   = 6.0    # pp drop to enter WATCH tier
+WATCH_VEL_PPM    = 3.0    # pp/min velocity to enter WATCH tier
+ATTACK_VEL_PPM   = 8.0    # pp/min velocity to enter ATTACK tier
+ATTACK_LOCK_SEC  = 30     # seconds to hold lock-on before auto-resuming scroll
+
+_attack_resume_timer = None   # threading.Timer handle
+
+
+def _update_history(base: dict, prob: float):
+    """Append current reading to match history, keep last 20."""
+    hist = base.setdefault("history", [])
+    hist.append((time.time(), prob))
+    if len(hist) > 20:
+        hist.pop(0)
+
+
+def _velocity(base: dict) -> float:
+    """Return pp/min drop rate for the worse player. Positive = dropping."""
+    h1 = [(t, p) for t, p in base.get("history", []) if p is not None]
+    if len(h1) < 2:
+        return 0.0
+    dt_min = (h1[-1][0] - h1[0][0]) / 60.0
+    if dt_min < 0.05:
+        return 0.0
+    # drop = baseline prob minus most recent (positive means falling)
+    drop = base["p1_prob"] - h1[-1][1]
+    return drop / dt_min
+
+
+def _tier(delta: float, velocity: float, mid_match: bool) -> str:
+    if mid_match:
+        return "NORMAL"
+    if delta >= DELTA_THRESHOLD_PCT or velocity >= ATTACK_VEL_PPM:
+        return "ATTACK"
+    if delta >= WATCH_DELTA_PP or velocity >= WATCH_VEL_PPM:
+        return "WATCH"
+    return "NORMAL"
+
+
+def _auto_resume_scroll():
+    global scrolling_enabled, _attack_resume_timer
+    _attack_resume_timer = None
+    if not scrolling_enabled:
+        scrolling_enabled = True
+        print(f"{CYAN}[LOCK-ON] 30s elapsed — resuming scroll.{RESET}")
+        if _dash:
+            _dash.root.after(0, lambda: _dash.btn_scroll.config(
+                text="⏸ Pause  [Space]", bg=Dashboard.YELLOW_C, fg="#000"))
+
+
+def _engage_lock_on(match_key: str):
+    """Pause scroll and schedule auto-resume after ATTACK_LOCK_SEC."""
+    global scrolling_enabled, _attack_resume_timer
+    if scrolling_enabled:
+        scrolling_enabled = False
+        print(f"{RED}[LOCK-ON] Scroll paused — watching {match_key}{RESET}")
+        if _dash:
+            _dash.root.after(0, lambda: _dash.btn_scroll.config(
+                text="🔒 LOCKED ON  [Space]", bg=Dashboard.RED_C, fg="white"))
+    # Reset timer each time the same match keeps escalating
+    if _attack_resume_timer:
+        _attack_resume_timer.cancel()
+    _attack_resume_timer = threading.Timer(ATTACK_LOCK_SEC, _auto_resume_scroll)
+    _attack_resume_timer.daemon = True
+    _attack_resume_timer.start()
+
+
+# =============================================================================
 #  CORE PROCESSING
 # =============================================================================
 
 def process_matches(match_list: list[dict]):
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"\n{GREY}{'─' * 64}{RESET}")
-    print(f"{CYAN}[{ts}]  Matches on this frame: {len(match_list)}{RESET}")
+    print(f"{CYAN}[{ts}]  on screen: {len(match_list)}{RESET}")
 
     dashboard_rows = []
 
@@ -921,48 +1020,44 @@ def process_matches(match_list: list[dict]):
         o1, o2 = m["p1_odds"], m["p2_odds"]
         key    = f"{p1}|{p2}"
 
-        prob1  = american_to_implied(o1)
-        prob2  = american_to_implied(o2)
-        vig    = vig_pct(prob1, prob2)
+        prob1 = american_to_implied(o1)
+        prob2 = american_to_implied(o2)
 
-        # Anchor baseline — reject mid-match entries where odds are already extreme
-        mid_match = False
-        new_flag  = ""
+        # ── Baseline anchor ───────────────────────────────────────────────────
         if key not in baselines:
-            if prob1 > BASELINE_MAX_IMPLIED or prob2 > BASELINE_MAX_IMPLIED:
-                baselines[key] = {
-                    "p1_prob": prob1, "p2_prob": prob2,
-                    "p1_odds": o1,    "p2_odds": o2,
-                    "seen_at": ts,    "quality": "MID_MATCH",
-                }
-                new_flag  = f"  {GREY}[MID-MATCH]{RESET}"
-                mid_match = True
-            else:
-                baselines[key] = {
-                    "p1_prob": prob1, "p2_prob": prob2,
-                    "p1_odds": o1,    "p2_odds": o2,
-                    "seen_at": ts,    "quality": "OK",
-                }
-                new_flag = f"  {GREEN}[NEW BASELINE]{RESET}"
+            quality = "MID_MATCH" if (
+                prob1 > BASELINE_MAX_IMPLIED or prob2 > BASELINE_MAX_IMPLIED
+            ) else "OK"
+            baselines[key] = {
+                "p1_prob": prob1, "p2_prob": prob2,
+                "p1_odds": o1,    "p2_odds": o2,
+                "seen_at": ts,    "quality": quality,
+                "history": [],
+            }
 
         base      = baselines[key]
-        mid_match = base.get("quality") == "MID_MATCH"
-        d1        = base["p1_prob"] - prob1
-        d2        = base["p2_prob"] - prob2
+        mid_match = base["quality"] == "MID_MATCH"
 
-        def delta_col(d):
-            if d >= DELTA_THRESHOLD_PCT:          return RED
-            if d >= DELTA_THRESHOLD_PCT * 0.55:   return YELLOW
-            return GREEN
+        # ── Update history (track worst player's prob) ────────────────────────
+        worst_prob = min(prob1, prob2)   # lower = more in trouble
+        _update_history(base, worst_prob)
 
-        print(f"\n  {BOLD}{p1}{RESET} vs {BOLD}{p2}{RESET}"
-              f"  Sets:{m.get('sets','?')}  Vig:{vig:.2f}%{new_flag}")
-        print(f"  {p1:<22} {o1:>+7d}  {prob1:>6.1f}%  {base['p1_prob']:>6.1f}%  "
-              f"{delta_col(d1)}{d1:>+8.1f}pp{RESET}")
-        print(f"  {p2:<22} {o2:>+7d}  {prob2:>6.1f}%  {base['p2_prob']:>6.1f}%  "
-              f"{delta_col(d2)}{d2:>+8.1f}pp{RESET}")
+        d1  = base["p1_prob"] - prob1
+        d2  = base["p2_prob"] - prob2
+        worst_delta = max(d1, d2)
+        vel = _velocity(base)
+        tier = _tier(worst_delta, vel, mid_match)
 
+        # ── Terminal print (compact) ──────────────────────────────────────────
+        tier_tag = f"{RED}[ATTACK]{RESET}" if tier=="ATTACK" else \
+                   f"{YELLOW}[WATCH]{RESET}"  if tier=="WATCH"  else ""
+        if tier != "NORMAL" or worst_delta > 2:
+            print(f"  {p1} vs {p2}  Δ{worst_delta:.1f}pp  {vel:+.1f}pp/min  {tier_tag}")
+
+        # ── Fire alert + lock-on ──────────────────────────────────────────────
         if not mid_match:
+            if tier == "ATTACK":
+                _engage_lock_on(key)
             if d1 >= DELTA_THRESHOLD_PCT:
                 fire_alert(key, p1, d1, prob1, base["p1_prob"], o1, p2, o2)
             if d2 >= DELTA_THRESHOLD_PCT:
@@ -974,15 +1069,25 @@ def process_matches(match_list: list[dict]):
             "sets":      m.get("sets", "?-?"),
             "p1_odds":   o1,    "p2_odds": o2,
             "p1_prob":   prob1, "p2_prob": prob2,
-            "base_p1":   base["p1_prob"], "base_p2": base["p2_prob"],
             "d1":        d1,    "d2":      d2,
+            "velocity":  vel,
+            "tier":      tier,
             "mid_match": mid_match,
         })
 
     if _dash:
+        # Sort: ATTACK first, then WATCH, then NORMAL, then MID_MATCH
+        tier_order = {"ATTACK": 0, "WATCH": 1, "NORMAL": 2}
+        dashboard_rows.sort(key=lambda r: (
+            tier_order.get(r["tier"], 3),
+            -max(r["d1"], r["d2"])
+        ))
         scroll_pct = int(scroll_step / max(SWIPES_PER_PASS, 1) * 100)
-        _dash.update_matches(dashboard_rows,
-                             f"scanning list {scroll_pct}%")
+        attack_n = sum(1 for r in dashboard_rows if r["tier"] == "ATTACK")
+        watch_n  = sum(1 for r in dashboard_rows if r["tier"] == "WATCH")
+        status   = (f"🔴 {attack_n} ATTACK  🟡 {watch_n} WATCH  |  "
+                    f"scan {scroll_pct}%  |  {len(baselines)} baselines")
+        _dash.update_matches(dashboard_rows, status)
 
 
 # =============================================================================
