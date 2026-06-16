@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Fanatics Tennis Analytics — Live Value Tracker</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  :root {
+    --fan-navy: #0a0e1a;
+    --fan-navy-card: #111827;
+    --fan-navy-card2: #1a2236;
+    --fan-red: #e8310f;
+    --fan-red-dim: rgba(232,49,15,0.15);
+    --fan-red-glow: rgba(232,49,15,0.25);
+    --fan-orange: #f97316;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--fan-navy); color: #f1f5f9; font-family: 'Inter', system-ui, sans-serif; margin: 0; min-height: 100vh; }
+  .glow-red { box-shadow: 0 0 0 1px rgba(232,49,15,0.5), 0 0 16px var(--fan-red-glow); background: var(--fan-red-dim) !important; }
+  .glow-red td { color: #fca5a5 !important; }
+  .pill-delta-hot { background: rgba(232,49,15,0.2); color: #fca5a5; border: 1px solid rgba(232,49,15,0.4); }
+  .pill-delta-warm { background: rgba(249,115,22,0.15); color: #fdba74; border: 1px solid rgba(249,115,22,0.35); }
+  .pill-delta-cool { background: rgba(30,58,138,0.3); color: #93c5fd; border: 1px solid rgba(30,58,138,0.4); }
+  .tab-active { background: var(--fan-red); color: #fff; }
+  .tab-inactive { background: #1a2236; color: #94a3b8; }
+  .tab-inactive:hover { background: #1e2d47; color: #cbd5e1; }
+  input[type=range] { accent-color: var(--fan-red); }
+  input[type=text], input[type=number] { background: #1a2236; border: 1px solid #334155; color: #f1f5f9; border-radius: 8px; padding: 8px 12px; outline: none; }
+  input[type=text]:focus, input[type=number]:focus { border-color: var(--fan-red); box-shadow: 0 0 0 2px rgba(232,49,15,0.2); }
+  .toggle-bg { background: #334155; transition: background 0.2s; }
+  .toggle-bg.on { background: var(--fan-red); }
+  .toggle-dot { transition: transform 0.2s; }
+  .toggle-dot.on { transform: translateX(20px); }
+  @keyframes pulse-value { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
+  .pulse-anim { animation: pulse-value 1.5s ease-in-out infinite; }
+  @keyframes flash-in { 0% { background: rgba(232,49,15,0.5); } 100% { background: transparent; } }
+  .flash { animation: flash-in 0.8s ease-out; }
+  table { border-collapse: collapse; width: 100%; }
+  th { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; padding: 10px 14px; text-align: left; border-bottom: 1px solid #1e2d47; white-space: nowrap; }
+  td { padding: 12px 14px; font-size: 13px; border-bottom: 1px solid #111827; white-space: nowrap; }
+  tr:last-child td { border-bottom: none; }
+  tr.match-row { transition: background 0.3s; cursor: pointer; }
+  tr.match-row:hover td { background: rgba(255,255,255,0.02); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 11px; font-weight: 600; letter-spacing: 0.03em; }
+  .live-dot { width: 7px; height: 7px; border-radius: 50%; background: #22c55e; display: inline-block; margin-right: 5px; animation: pulse-dot 1.5s ease-in-out infinite; }
+  @keyframes pulse-dot { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(0.8); } }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: #0a0e1a; }
+  ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+  .vig-bar-bg { background: #1e2d47; border-radius: 4px; height: 6px; overflow: hidden; }
+  .vig-bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s; }
+  .stat-card { background: #111827; border: 1px solid #1e2d47; border-radius: 12px; padding: 16px; }
+  .odds-change-up { color: #4ade80; }
+  .odds-change-down { color: #f87171; }
+  .fanatics-logo-text { background: linear-gradient(90deg, #e8310f, #f97316); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+</style>
+</head>
+<body>
+
+<div id="app" class="max-w-7xl mx-auto px-4 py-6">
+
+  <!-- Header -->
+  <header class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-xl flex items-center justify-center" style="background:var(--fan-red)">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><line x1="2" y1="12" x2="22" y2="12"/></svg>
+      </div>
+      <div>
+        <h1 class="text-xl font-bold tracking-tight"><span class="fanatics-logo-text">FANATICS</span> <span class="text-white">Tennis Tracker</span></h1>
+        <p class="text-xs" style="color:#64748b">Live value detection &amp; line movement analysis</p>
+      </div>
+    </div>
+    <div class="flex items-center gap-4">
+      <div id="live-status" class="flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold" style="background:#0f2318;color:#4ade80;border:1px solid #166534">
+        <span class="live-dot"></span> LIVE
+      </div>
+      <div id="last-update" class="text-xs" style="color:#475569">Updated just now</div>
+    </div>
+  </header>
+
+  <!-- Controls Bar -->
+  <div class="rounded-xl p-4 mb-5 flex flex-col lg:flex-row gap-4 items-start lg:items-center" style="background:#111827;border:1px solid #1e2d47">
+
+    <!-- API Key -->
+    <div class="flex flex-col gap-1 flex-1 min-w-0">
+      <label class="text-xs font-semibold uppercase tracking-widest" style="color:#64748b">The Odds API Key</label>
+      <div class="flex gap-2">
+        <input type="text" id="api-key-input" placeholder="Paste your API key here…" class="flex-1 text-sm" style="min-width:0" />
+        <button onclick="saveApiKey()" class="px-4 py-2 rounded-lg text-sm font-semibold text-white transition" style="background:var(--fan-red)">Save</button>
+        <button onclick="fetchLiveOdds()" class="px-4 py-2 rounded-lg text-sm font-semibold transition" style="background:#1a2236;color:#cbd5e1;border:1px solid #334155">Fetch</button>
+      </div>
+    </div>
+
+    <!-- Delta Threshold -->
+    <div class="flex flex-col gap-1" style="min-width:200px">
+      <label class="text-xs font-semibold uppercase tracking-widest" style="color:#64748b">Value Alert Threshold: <span id="threshold-label" style="color:var(--fan-orange)">10%</span></label>
+      <input type="range" id="threshold-slider" min="2" max="30" value="10" step="1" class="w-full" oninput="updateThreshold(this.value)" />
+    </div>
+
+    <!-- Demo Toggle -->
+    <div class="flex flex-col gap-1">
+      <label class="text-xs font-semibold uppercase tracking-widest" style="color:#64748b">Demo Mode</label>
+      <div class="flex items-center gap-2">
+        <button id="demo-toggle" onclick="toggleDemo()" class="relative w-12 h-6 rounded-full toggle-bg on flex-shrink-0">
+          <div id="demo-dot" class="toggle-dot on absolute top-1 left-1 w-4 h-4 bg-white rounded-full shadow"></div>
+        </button>
+        <span id="demo-label" class="text-sm font-semibold" style="color:var(--fan-orange)">ON — Simulating</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="flex gap-2 mb-5">
+    <button id="tab-live" onclick="switchTab('live')" class="tab-active px-5 py-2.5 rounded-xl text-sm font-semibold transition">Live Tracker</button>
+    <button id="tab-advanced" onclick="switchTab('advanced')" class="tab-inactive px-5 py-2.5 rounded-xl text-sm font-semibold transition">Advanced Stats</button>
+  </div>
+
+  <!-- TAB 1: LIVE TRACKER -->
+  <div id="panel-live">
+    <!-- Summary Cards -->
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+      <div class="stat-card">
+        <div class="text-xs uppercase tracking-wider mb-1" style="color:#64748b">Live Matches</div>
+        <div id="stat-total" class="text-2xl font-bold text-white">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="text-xs uppercase tracking-wider mb-1" style="color:#64748b">Value Alerts</div>
+        <div id="stat-alerts" class="text-2xl font-bold" style="color:var(--fan-red)">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="text-xs uppercase tracking-wider mb-1" style="color:#64748b">Max Delta</div>
+        <div id="stat-max-delta" class="text-2xl font-bold" style="color:var(--fan-orange)">0%</div>
+      </div>
+      <div class="stat-card">
+        <div class="text-xs uppercase tracking-wider mb-1" style="color:#64748b">Avg Fan Vig</div>
+        <div id="stat-avg-vig" class="text-2xl font-bold text-white">0%</div>
+      </div>
+    </div>
+
+    <!-- Match Table -->
+    <div class="rounded-xl overflow-hidden" style="background:#111827;border:1px solid #1e2d47">
+      <div class="px-4 py-3 flex items-center justify-between border-b" style="border-color:#1e2d47">
+        <h2 class="text-sm font-semibold text-white">Live Matches</h2>
+        <div id="filter-count" class="text-xs" style="color:#64748b"></div>
+      </div>
+      <div class="overflow-x-auto">
+        <table>
+          <thead>
+            <tr>
+              <th>Match</th>
+              <th>Set / Score</th>
+              <th>Pre-Match Line</th>
+              <th>Fanatics Live</th>
+              <th>DraftKings Live</th>
+              <th>FanDuel Live</th>
+              <th>Implied Δ%</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="match-tbody">
+            <tr><td colspan="8" class="text-center py-10" style="color:#475569">Loading matches…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB 2: ADVANCED STATS -->
+  <div id="panel-advanced" class="hidden">
+    <div id="adv-placeholder" class="rounded-xl p-8 text-center" style="background:#111827;border:1px solid #1e2d47">
+      <div class="text-4xl mb-3">🎾</div>
+      <p class="text-sm" style="color:#64748b">Click a match row in the Live Tracker to load its advanced breakdown.</p>
+    </div>
+    <div id="adv-content" class="hidden">
+      <!-- Match Header -->
+      <div class="rounded-xl p-4 mb-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3" style="background:#111827;border:1px solid #1e2d47">
+        <div>
+          <h2 id="adv-match-title" class="text-lg font-bold text-white"></h2>
+          <p id="adv-match-meta" class="text-xs mt-1" style="color:#64748b"></p>
+        </div>
+        <button onclick="switchTab('live')" class="text-xs px-3 py-1.5 rounded-lg" style="background:#1a2236;color:#94a3b8;border:1px solid #334155">← Back to tracker</button>
+      </div>
+
+      <!-- Vig Analysis -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+        <div class="rounded-xl p-4" style="background:#111827;border:1px solid #1e2d47">
+          <h3 class="text-sm font-semibold mb-4 uppercase tracking-wider" style="color:#64748b">Fanatics Vig Breakdown</h3>
+          <div id="adv-vig-content"></div>
+        </div>
+        <div class="rounded-xl p-4" style="background:#111827;border:1px solid #1e2d47">
+          <h3 class="text-sm font-semibold mb-4 uppercase tracking-wider" style="color:#64748b">Fair No-Vig Price</h3>
+          <div id="adv-fair-content"></div>
+        </div>
+      </div>
+
+      <!-- Book Comparison -->
+      <div class="rounded-xl p-4 mb-4" style="background:#111827;border:1px solid #1e2d47">
+        <h3 class="text-sm font-semibold mb-4 uppercase tracking-wider" style="color:#64748b">Cross-Book Implied Probability</h3>
+        <div id="adv-book-compare"></div>
+      </div>
+
+      <!-- Probability Timeline -->
+      <div class="rounded-xl p-4" style="background:#111827;border:1px solid #1e2d47">
+        <h3 class="text-sm font-semibold mb-3 uppercase tracking-wider" style="color:#64748b">Implied Probability Drift — Player 1</h3>
+        <div id="adv-timeline" class="flex items-end gap-1 mt-2" style="height:80px"></div>
+        <div class="flex justify-between mt-1">
+          <span class="text-xs" style="color:#475569">Pre-match</span>
+          <span class="text-xs" style="color:#475569">Now</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const DEMO_MATCHES_INIT = [
+  {
+    id: 'alc-djk',
+    p1: 'Alcaraz', p2: 'Djokovic',
+    set: '1-1', score: '2-3',
+    preOdds: { p1: -280, p2: 230 },
+    fanOdds: { p1: -280, p2: 230 },
+    dkOdds:  { p1: -275, p2: 225 },
+    fdOdds:  { p1: -285, p2: 235 },
+    probHistory: [],
+  },
+  {
+    id: 'sin-med',
+    p1: 'Sinner', p2: 'Medvedev',
+    set: '2-0', score: '4-1',
+    preOdds: { p1: -180, p2: 155 },
+    fanOdds: { p1: -180, p2: 155 },
+    dkOdds:  { p1: -185, p2: 160 },
+    fdOdds:  { p1: -175, p2: 150 },
+    probHistory: [],
+  },
+  {
+    id: 'fritz-rub',
+    p1: 'Fritz', p2: 'Ruud',
+    set: '1-1', score: '1-1',
+    preOdds: { p1: 110, p2: -130 },
+    fanOdds: { p1: 110, p2: -130 },
+    dkOdds:  { p1: 105, p2: -125 },
+    fdOdds:  { p1: 115, p2: -135 },
+    probHistory: [],
+  },
+  {
+    id: 'mus-tsit',
+    p1: 'Musetti', p2: 'Tsitsipas',
+    set: '0-1', score: '1-5',
+    preOdds: { p1: 175, p2: -210 },
+    fanOdds: { p1: 175, p2: -210 },
+    dkOdds:  { p1: 180, p2: -215 },
+    fdOdds:  { p1: 170, p2: -205 },
+    probHistory: [],
+  },
+];
+
+let matches = JSON.parse(JSON.stringify(DEMO_MATCHES_INIT));
+matches.forEach(m => { m.probHistory = [impliedProb(m.preOdds.p1)]; });
+
+let demoMode = true;
+let demoInterval = null;
+let threshold = 10;
+let selectedMatchId = null;
+let apiKey = localStorage.getItem('fan_odds_api_key') || '';
+let tickCount = 0;
+
+if (apiKey) document.getElementById('api-key-input').value = apiKey;
+
+function impliedProb(odds) {
+  if (odds < 0) return (-odds) / (-odds + 100) * 100;
+  return 100 / (odds + 100) * 100;
+}
+
+function vigCalc(o1, o2) {
+  return (impliedProb(o1) + impliedProb(o2) - 100);
+}
+
+function fairNoVig(o1, o2) {
+  const p1 = impliedProb(o1), p2 = impliedProb(o2);
+  const total = p1 + p2;
+  return { p1: p1 / total * 100, p2: p2 / total * 100 };
+}
+
+function toAmerican(prob) {
+  if (prob >= 50) {
+    const v = Math.round(-prob / (100 - prob) * 100);
+    return v.toString();
+  } else {
+    const v = Math.round((100 - prob) / prob * 100);
+    return '+' + v;
+  }
+}
+
+function fmtOdds(o) {
+  return o > 0 ? '+' + o : o.toString();
+}
+
+function deltaClass(d) {
+  if (d >= threshold) return 'pill-delta-hot';
+  if (d >= threshold * 0.6) return 'pill-delta-warm';
+  return 'pill-delta-cool';
+}
+
+function renderTable() {
+  const tbody = document.getElementById('match-tbody');
+  let alertCount = 0;
+  let maxDelta = 0;
+  let totalVig = 0;
+
+  const rows = matches.map(m => {
+    const preProbP1 = impliedProb(m.preOdds.p1);
+    const liveProbP1 = impliedProb(m.fanOdds.p1);
+    const delta = Math.abs(preProbP1 - liveProbP1);
+    if (delta > maxDelta) maxDelta = delta;
+    const vig = vigCalc(m.fanOdds.p1, m.fanOdds.p2);
+    totalVig += vig;
+    const isValue = delta >= threshold;
+    if (isValue) alertCount++;
+
+    const dkColor = Math.abs(m.dkOdds.p1 - m.fanOdds.p1) > 10 ? 'color:#fbbf24' : '';
+    const fdColor = Math.abs(m.fdOdds.p1 - m.fanOdds.p1) > 10 ? 'color:#fbbf24' : '';
+    const rowClass = isValue ? 'glow-red' : '';
+    const deltaClass2 = deltaClass(delta);
+
+    return `<tr class="match-row ${rowClass}" onclick="selectMatch('${m.id}')" data-id="${m.id}">
+      <td>
+        <div class="font-semibold text-white">${m.p1} <span style="color:#475569">vs</span> ${m.p2}</div>
+        <div class="text-xs mt-0.5" style="color:#475569">ATP Wimbledon</div>
+      </td>
+      <td>
+        <span class="font-semibold text-white">Sets ${m.set}</span>
+        <span class="ml-2 text-xs" style="color:#64748b">${m.score}</span>
+      </td>
+      <td>
+        <span class="font-mono">${fmtOdds(m.preOdds.p1)}</span>
+        <span class="mx-1" style="color:#334155">/</span>
+        <span class="font-mono">${fmtOdds(m.preOdds.p2)}</span>
+      </td>
+      <td>
+        <span class="font-mono font-semibold text-white">${fmtOdds(m.fanOdds.p1)}</span>
+        <span class="mx-1" style="color:#334155">/</span>
+        <span class="font-mono font-semibold text-white">${fmtOdds(m.fanOdds.p2)}</span>
+      </td>
+      <td style="${dkColor}">
+        <span class="font-mono">${fmtOdds(m.dkOdds.p1)}</span> /
+        <span class="font-mono">${fmtOdds(m.dkOdds.p2)}</span>
+      </td>
+      <td style="${fdColor}">
+        <span class="font-mono">${fmtOdds(m.fdOdds.p1)}</span> /
+        <span class="font-mono">${fmtOdds(m.fdOdds.p2)}</span>
+      </td>
+      <td>
+        <span class="badge ${deltaClass2}">${isValue ? '⚡ ' : ''}${delta.toFixed(1)}%</span>
+      </td>
+      <td>
+        ${isValue
+          ? `<span class="badge pulse-anim" style="background:rgba(232,49,15,0.2);color:#fca5a5;border:1px solid rgba(232,49,15,0.4)">VALUE</span>`
+          : `<span class="badge" style="background:#1a2236;color:#64748b;border:1px solid #334155">Watching</span>`}
+      </td>
+    </tr>`;
+  });
+
+  tbody.innerHTML = rows.join('');
+
+  document.getElementById('stat-total').textContent = matches.length;
+  document.getElementById('stat-alerts').textContent = alertCount;
+  document.getElementById('stat-max-delta').textContent = maxDelta.toFixed(1) + '%';
+  document.getElementById('stat-avg-vig').textContent = (totalVig / matches.length).toFixed(2) + '%';
+
+  const filtered = matches.filter(m => Math.abs(impliedProb(m.fanOdds.p1) - impliedProb(m.preOdds.p1)) >= threshold);
+  document.getElementById('filter-count').textContent = `${filtered.length} of ${matches.length} above threshold`;
+
+  if (selectedMatchId) renderAdvanced(selectedMatchId);
+  document.getElementById('last-update').textContent = 'Updated ' + new Date().toLocaleTimeString();
+}
+
+function selectMatch(id) {
+  selectedMatchId = id;
+  switchTab('advanced');
+  renderAdvanced(id);
+}
+
+function renderAdvanced(id) {
+  const m = matches.find(x => x.id === id);
+  if (!m) return;
+  document.getElementById('adv-placeholder').classList.add('hidden');
+  document.getElementById('adv-content').classList.remove('hidden');
+
+  document.getElementById('adv-match-title').textContent = `${m.p1} vs ${m.p2}`;
+  document.getElementById('adv-match-meta').textContent = `ATP Wimbledon · Sets ${m.set} · Game ${m.score} · Live`;
+
+  const fanVig = vigCalc(m.fanOdds.p1, m.fanOdds.p2);
+  const dkVig  = vigCalc(m.dkOdds.p1, m.dkOdds.p2);
+  const fdVig  = vigCalc(m.fdOdds.p1, m.fdOdds.p2);
+  const preVig = vigCalc(m.preOdds.p1, m.preOdds.p2);
+
+  const vigDelta = fanVig - preVig;
+  const vigColor = vigDelta > 0 ? '#f87171' : '#4ade80';
+  const vigSign = vigDelta > 0 ? '+' : '';
+
+  document.getElementById('adv-vig-content').innerHTML = `
+    <div class="space-y-4">
+      <div>
+        <div class="flex justify-between text-xs mb-1" style="color:#64748b"><span>Pre-Match Hold</span><span style="color:#94a3b8">${preVig.toFixed(3)}%</span></div>
+        <div class="vig-bar-bg"><div class="vig-bar-fill" style="width:${Math.min(preVig*6,100)}%;background:#334155"></div></div>
+      </div>
+      <div>
+        <div class="flex justify-between text-xs mb-1" style="color:#64748b"><span>Fanatics Live Hold</span><span style="color:var(--fan-orange)">${fanVig.toFixed(3)}%</span></div>
+        <div class="vig-bar-bg"><div class="vig-bar-fill" style="width:${Math.min(fanVig*6,100)}%;background:var(--fan-red)"></div></div>
+      </div>
+      <div>
+        <div class="flex justify-between text-xs mb-1" style="color:#64748b"><span>DraftKings Live Hold</span><span style="color:#94a3b8">${dkVig.toFixed(3)}%</span></div>
+        <div class="vig-bar-bg"><div class="vig-bar-fill" style="width:${Math.min(dkVig*6,100)}%;background:#1d4ed8"></div></div>
+      </div>
+      <div>
+        <div class="flex justify-between text-xs mb-1" style="color:#64748b"><span>FanDuel Live Hold</span><span style="color:#94a3b8">${fdVig.toFixed(3)}%</span></div>
+        <div class="vig-bar-bg"><div class="vig-bar-fill" style="width:${Math.min(fdVig*6,100)}%;background:#7c3aed"></div></div>
+      </div>
+      <div class="rounded-lg p-3 mt-2" style="background:#1a2236;border:1px solid #334155">
+        <div class="text-xs" style="color:#64748b">Fanatics Vig Shift vs Pre-Match</div>
+        <div class="text-xl font-bold mt-1" style="color:${vigColor}">${vigSign}${vigDelta.toFixed(3)}%</div>
+        <div class="text-xs mt-1" style="color:#475569">${vigDelta > 0.5 ? 'House is over-taxing the live line — inflated margin.' : vigDelta < -0.5 ? 'Slightly reduced live hold — potentially better value.' : 'Hold margin stable vs. pre-match.'}</div>
+      </div>
+    </div>`;
+
+  const fair = fairNoVig(m.fanOdds.p1, m.fanOdds.p2);
+  const fairPre = fairNoVig(m.preOdds.p1, m.preOdds.p2);
+  const shift1 = fair.p1 - fairPre.p1;
+  const shiftColor1 = shift1 < -5 ? '#f87171' : shift1 > 5 ? '#4ade80' : '#94a3b8';
+  const shiftSign1 = shift1 > 0 ? '+' : '';
+
+  document.getElementById('adv-fair-content').innerHTML = `
+    <div class="space-y-3">
+      <div class="rounded-lg p-3" style="background:#1a2236;border:1px solid #334155">
+        <div class="text-xs mb-2" style="color:#64748b">${m.p1} — Fair Price (no-vig)</div>
+        <div class="flex items-baseline gap-2">
+          <span class="text-xl font-bold text-white">${fair.p1.toFixed(2)}%</span>
+          <span class="text-sm font-mono" style="color:#64748b">${toAmerican(fair.p1)}</span>
+        </div>
+        <div class="text-xs mt-1" style="color:${shiftColor1}">${shiftSign1}${shift1.toFixed(2)}% vs pre-match</div>
+        <div class="vig-bar-bg mt-2"><div class="vig-bar-fill" style="width:${fair.p1.toFixed(0)}%;background:var(--fan-red)"></div></div>
+      </div>
+      <div class="rounded-lg p-3" style="background:#1a2236;border:1px solid #334155">
+        <div class="text-xs mb-2" style="color:#64748b">${m.p2} — Fair Price (no-vig)</div>
+        <div class="flex items-baseline gap-2">
+          <span class="text-xl font-bold text-white">${fair.p2.toFixed(2)}%</span>
+          <span class="text-sm font-mono" style="color:#64748b">${toAmerican(fair.p2)}</span>
+        </div>
+        <div class="vig-bar-bg mt-2"><div class="vig-bar-fill" style="width:${fair.p2.toFixed(0)}%;background:#334155"></div></div>
+      </div>
+      <div class="text-xs p-3 rounded-lg" style="background:#0f2318;color:#4ade80;border:1px solid #166534">
+        <strong>No-vig check:</strong> ${fair.p1.toFixed(2)} + ${fair.p2.toFixed(2)} = ${(fair.p1+fair.p2).toFixed(2)}% (should = 100%)
+      </div>
+    </div>`;
+
+  const books = [
+    { name: 'Fanatics', odds: m.fanOdds, color: 'var(--fan-red)' },
+    { name: 'DraftKings', odds: m.dkOdds, color: '#1d4ed8' },
+    { name: 'FanDuel', odds: m.fdOdds, color: '#7c3aed' },
+    { name: 'Pre-Match', odds: m.preOdds, color: '#475569' },
+  ];
+  document.getElementById('adv-book-compare').innerHTML = `
+    <div class="overflow-x-auto">
+    <table>
+      <thead><tr>
+        <th>Book</th>
+        <th>${m.p1} Odds</th>
+        <th>${m.p1} Impl %</th>
+        <th>${m.p2} Odds</th>
+        <th>${m.p2} Impl %</th>
+        <th>Hold %</th>
+        <th>Best for ${m.p1}?</th>
+      </tr></thead>
+      <tbody>${books.map(b => {
+        const p1 = impliedProb(b.odds.p1), p2 = impliedProb(b.odds.p2);
+        const vig = p1 + p2 - 100;
+        const best = b.odds.p1 > Math.max(m.fanOdds.p1, m.dkOdds.p1, m.fdOdds.p1, m.preOdds.p1) - 1;
+        return `<tr>
+          <td><span class="inline-block w-2.5 h-2.5 rounded-full mr-2" style="background:${b.color}"></span><span class="font-semibold">${b.name}</span></td>
+          <td class="font-mono">${fmtOdds(b.odds.p1)}</td>
+          <td>${p1.toFixed(2)}%</td>
+          <td class="font-mono">${fmtOdds(b.odds.p2)}</td>
+          <td>${p2.toFixed(2)}%</td>
+          <td style="color:${vig > 5 ? '#f87171' : '#4ade80'}">${vig.toFixed(3)}%</td>
+          <td>${best ? '<span class="badge" style="background:rgba(34,197,94,0.15);color:#4ade80;border:1px solid rgba(34,197,94,0.3)">Best</span>' : '—'}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table></div>`;
+
+  const hist = m.probHistory.slice(-20);
+  const maxH = Math.max(...hist, 80);
+  const minH = Math.min(...hist, 20);
+  const range = maxH - minH || 1;
+  const bars = hist.map((v, i) => {
+    const pct = ((v - minH) / range * 70 + 10);
+    const isLast = i === hist.length - 1;
+    const color = isLast ? 'var(--fan-red)' : (v < hist[0] - 5 ? '#f87171' : '#334155');
+    return `<div title="${v.toFixed(1)}%" style="flex:1;background:${color};border-radius:3px 3px 0 0;min-height:4px;height:${pct}%;transition:height 0.3s"></div>`;
+  }).join('');
+  document.getElementById('adv-timeline').innerHTML = bars || '<div style="color:#475569;font-size:12px;align-self:center">No history yet</div>';
+}
+
+function simulateDemo() {
+  tickCount++;
+  matches = matches.map((m, idx) => {
+    const m2 = { ...m, fanOdds: {...m.fanOdds}, dkOdds: {...m.dkOdds}, fdOdds: {...m.fdOdds} };
+
+    // Every 3rd tick, force a "favourite drop" on match 0 or 3 to trigger alerts
+    const forceDrop = (tickCount % 6 === 0 && (idx === 0 || idx === 3));
+
+    const nudge = (base, spread) => base + Math.round((Math.random() - 0.5) * spread);
+    const drift = forceDrop ? (m2.fanOdds.p1 < 0 ? 80 : -80) : 0;
+
+    m2.fanOdds.p1 = nudge(m.fanOdds.p1 + drift, 12);
+    m2.fanOdds.p2 = nudge(m.fanOdds.p2 - drift, 12);
+    m2.dkOdds.p1  = nudge(m.dkOdds.p1  + drift * 0.9, 8);
+    m2.dkOdds.p2  = nudge(m.dkOdds.p2  - drift * 0.9, 8);
+    m2.fdOdds.p1  = nudge(m.fdOdds.p1  + drift * 0.95, 8);
+    m2.fdOdds.p2  = nudge(m.fdOdds.p2  - drift * 0.95, 8);
+
+    // Keep odds within reasonable bounds
+    const clampP1 = m.preOdds.p1 < 0 ? [-600, +200] : [-200, +400];
+    m2.fanOdds.p1 = Math.max(clampP1[0], Math.min(clampP1[1], m2.fanOdds.p1));
+    m2.fanOdds.p2 = m2.fanOdds.p1 < 0 ? Math.abs(Math.round(m2.fanOdds.p1 * 0.3)) + 20 : -(Math.abs(Math.round(m2.fanOdds.p1 * 0.8)));
+
+    // Ensure sign consistency
+    if (m.preOdds.p1 < 0 && m2.fanOdds.p1 > 0) m2.fanOdds.p1 = -110;
+    if (m.preOdds.p1 > 0 && m2.fanOdds.p1 < 0) m2.fanOdds.p1 = 110;
+
+    // Update score occasionally
+    if (Math.random() < 0.15) {
+      const pts = ['0', '15', '30', '40'];
+      const a = Math.floor(Math.random() * 4);
+      const b = Math.floor(Math.random() * 4);
+      m2.score = pts[a] + '-' + pts[b];
+    }
+
+    const prob = impliedProb(m2.fanOdds.p1);
+    m2.probHistory = [...(m.probHistory || []), prob].slice(-50);
+    return m2;
+  });
+
+  renderTable();
+}
+
+function toggleDemo() {
+  demoMode = !demoMode;
+  const btn = document.getElementById('demo-toggle');
+  const dot = document.getElementById('demo-dot');
+  const lbl = document.getElementById('demo-label');
+  if (demoMode) {
+    btn.classList.add('on'); dot.classList.add('on');
+    lbl.textContent = 'ON — Simulating'; lbl.style.color = 'var(--fan-orange)';
+    matches = JSON.parse(JSON.stringify(DEMO_MATCHES_INIT));
+    matches.forEach(m => { m.probHistory = [impliedProb(m.preOdds.p1)]; });
+    startDemo();
+  } else {
+    btn.classList.remove('on'); dot.classList.remove('on');
+    lbl.textContent = 'OFF — Using API'; lbl.style.color = '#64748b';
+    stopDemo();
+    fetchLiveOdds();
+  }
+}
+
+function startDemo() {
+  stopDemo();
+  renderTable();
+  demoInterval = setInterval(simulateDemo, 4000);
+}
+
+function stopDemo() {
+  if (demoInterval) { clearInterval(demoInterval); demoInterval = null; }
+}
+
+function saveApiKey() {
+  apiKey = document.getElementById('api-key-input').value.trim();
+  localStorage.setItem('fan_odds_api_key', apiKey);
+  showToast('API key saved.');
+}
+
+async function fetchLiveOdds() {
+  if (demoMode) { showToast('Disable Demo Mode first.'); return; }
+  if (!apiKey) { showToast('Enter your API key first.'); return; }
+  const SPORTS = ['tennis_atp_wimbledon', 'tennis_wta_wimbledon'];
+  const BOOKS  = ['fanduel', 'draftkings', 'fanatics'];
+  const tbody  = document.getElementById('match-tbody');
+  tbody.innerHTML = '<tr><td colspan="8" class="text-center py-10" style="color:#64748b">Fetching from The Odds API…</td></tr>';
+
+  try {
+    let allEvents = [];
+    for (const sport of SPORTS) {
+      const url = `https://api.the-odds-api.com/v4/sports/${sport}/odds/?apiKey=${apiKey}&regions=us&markets=h2h&oddsFormat=american&bookmakers=${BOOKS.join(',')}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      const data = await res.json();
+      allEvents = allEvents.concat(data);
+    }
+    if (!allEvents.length) { tbody.innerHTML = '<tr><td colspan="8" class="text-center py-10" style="color:#64748b">No live matches found on The Odds API right now.</td></tr>'; return; }
+
+    matches = allEvents.map(ev => {
+      const byBook = {};
+      (ev.bookmakers || []).forEach(bm => {
+        const h2h = bm.markets?.find(mk => mk.key === 'h2h');
+        if (!h2h) return;
+        byBook[bm.key] = {};
+        h2h.outcomes.forEach(o => { byBook[bm.key][o.name] = o.price; });
+      });
+      const names = ev.home_team && ev.away_team ? [ev.home_team, ev.away_team] : ['Player 1', 'Player 2'];
+      const getOdds = (book, player) => byBook[book]?.[player] ?? (player === names[0] ? -110 : -110);
+      const fan = { p1: getOdds('fanatics', names[0]), p2: getOdds('fanatics', names[1]) };
+      const prob = impliedProb(fan.p1);
+      return {
+        id: ev.id,
+        p1: names[0], p2: names[1],
+        set: 'Live', score: '–',
+        preOdds: { ...fan },
+        fanOdds: { ...fan },
+        dkOdds:  { p1: getOdds('draftkings', names[0]), p2: getOdds('draftkings', names[1]) },
+        fdOdds:  { p1: getOdds('fanduel', names[0]),    p2: getOdds('fanduel', names[1]) },
+        probHistory: [prob],
+      };
+    });
+    renderTable();
+    showToast(`Loaded ${matches.length} events.`);
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="8" class="text-center py-8" style="color:#f87171">Error: ${e.message}</td></tr>`;
+  }
+}
+
+function updateThreshold(v) {
+  threshold = parseInt(v);
+  document.getElementById('threshold-label').textContent = v + '%';
+  renderTable();
+}
+
+function switchTab(tab) {
+  document.getElementById('panel-live').classList.toggle('hidden', tab !== 'live');
+  document.getElementById('panel-advanced').classList.toggle('hidden', tab !== 'advanced');
+  document.getElementById('tab-live').className = 'px-5 py-2.5 rounded-xl text-sm font-semibold transition ' + (tab === 'live' ? 'tab-active' : 'tab-inactive');
+  document.getElementById('tab-advanced').className = 'px-5 py-2.5 rounded-xl text-sm font-semibold transition ' + (tab === 'advanced' ? 'tab-active' : 'tab-inactive');
+}
+
+function showToast(msg) {
+  const el = document.createElement('div');
+  el.textContent = msg;
+  el.style.cssText = 'position:fixed;bottom:24px;right:24px;background:#1e2d47;color:#f1f5f9;border:1px solid #334155;padding:10px 18px;border-radius:10px;font-size:13px;z-index:9999;transition:opacity 0.4s';
+  document.body.appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 400); }, 2500);
+}
+
+// Boot
+startDemo();
+</script>
+</body>
+</html>
