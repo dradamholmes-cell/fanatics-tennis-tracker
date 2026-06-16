@@ -52,7 +52,7 @@ Setup:
 ---
 
 ### 1b. Fix Garbled Player Names
-**Status:** [ ] Not started
+**Status:** [x] Done - 2026-06-16
 
 **Root cause:** Flag emoji (🇦🇺) OCRs as random chars like `1m`, `ISI`, `SF`.
 
