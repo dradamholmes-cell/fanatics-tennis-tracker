@@ -90,9 +90,40 @@ SWIPES_PER_PASS      = (TOTAL_MATCHES_EST // MATCHES_PER_VIEW) + 4
 
 baselines        = {}
 last_alert_at    = defaultdict(float)
+
+BASELINES_FILE   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "baselines.json")
+WARMUP_SCANS     = 3      # number of consistent readings before baseline locks in
+WARMUP_VARIANCE  = 5.0    # max pp spread across warmup readings to be considered stable
 scroll_step      = 0
 _adb_ok          = None
 scrolling_enabled = True      # toggled by the UI button
+
+# =============================================================================
+#  BASELINE PERSISTENCE
+# =============================================================================
+
+def save_baselines():
+    try:
+        import json
+        # history contains floats/ints — safe to serialise
+        with open(BASELINES_FILE, "w") as f:
+            json.dump(baselines, f)
+    except Exception as e:
+        print(f"{YELLOW}[SAVE] Could not save baselines: {e}{RESET}")
+
+
+def load_baselines():
+    try:
+        import json
+        with open(BASELINES_FILE) as f:
+            data = json.load(f)
+        baselines.update(data)
+        print(f"{GREEN}[LOAD] Restored {len(baselines)} baselines from disk.{RESET}")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"{YELLOW}[LOAD] Could not load baselines: {e}{RESET}")
+
 
 RESET  = "\033[0m"
 BOLD   = "\033[1m"
@@ -445,8 +476,14 @@ class Dashboard:
     def _reset_baselines(self):
         baselines.clear()
         last_alert_at.clear()
+        try:
+            import os as _os
+            if _os.path.exists(BASELINES_FILE):
+                _os.remove(BASELINES_FILE)
+        except Exception:
+            pass
         self.lbl_status.config(text="Baselines RESET")
-        print(f"{YELLOW}[RESET] All baselines cleared.{RESET}")
+        print(f"{YELLOW}[RESET] All baselines cleared and file deleted.{RESET}")
 
     # ── Match table update ────────────────────────────────────────────────────
 
@@ -1023,20 +1060,48 @@ def process_matches(match_list: list[dict]):
         prob1 = american_to_implied(o1)
         prob2 = american_to_implied(o2)
 
-        # ── Baseline anchor ───────────────────────────────────────────────────
+        # ── Baseline anchor with warm-up ──────────────────────────────────────
         if key not in baselines:
-            quality = "MID_MATCH" if (
-                prob1 > BASELINE_MAX_IMPLIED or prob2 > BASELINE_MAX_IMPLIED
-            ) else "OK"
-            baselines[key] = {
-                "p1_prob": prob1, "p2_prob": prob2,
-                "p1_odds": o1,    "p2_odds": o2,
-                "seen_at": ts,    "quality": quality,
-                "history": [],
-            }
+            # Immediately reject mid-match entries
+            if prob1 > BASELINE_MAX_IMPLIED or prob2 > BASELINE_MAX_IMPLIED:
+                baselines[key] = {
+                    "p1_prob": prob1, "p2_prob": prob2,
+                    "p1_odds": o1,    "p2_odds": o2,
+                    "seen_at": ts,    "quality": "MID_MATCH",
+                    "history": [],    "warmup":  [],
+                }
+            else:
+                baselines[key] = {
+                    "p1_prob": prob1, "p2_prob": prob2,
+                    "p1_odds": o1,    "p2_odds": o2,
+                    "seen_at": ts,    "quality": "WARMUP",
+                    "history": [],    "warmup":  [prob1],
+                }
 
-        base      = baselines[key]
-        mid_match = base["quality"] == "MID_MATCH"
+        base = baselines[key]
+
+        # Accumulate warmup readings until stable
+        if base["quality"] == "WARMUP":
+            wu = base["warmup"]
+            if prob1 not in wu:          # avoid double-counting same frame
+                wu.append(prob1)
+            if len(wu) >= WARMUP_SCANS:
+                spread = max(wu) - min(wu)
+                if spread <= WARMUP_VARIANCE:
+                    # Stable — lock in baseline as average of warmup readings
+                    avg1 = sum(wu) / len(wu)
+                    avg2 = 100 - avg1    # approximate; will refine on next frame
+                    base["p1_prob"] = avg1
+                    base["p2_prob"] = prob2
+                    base["quality"] = "OK"
+                    print(f"{GREEN}[BASELINE] Locked: {key}  ({avg1:.1f}% / {prob2:.1f}%  "
+                          f"after {len(wu)} readings){RESET}")
+                    save_baselines()
+                else:
+                    # Unstable — reset and try again
+                    base["warmup"] = [prob1]
+
+        mid_match = base["quality"] in ("MID_MATCH", "WARMUP")
 
         # ── Update history (track worst player's prob) ────────────────────────
         worst_prob = min(prob1, prob2)   # lower = more in trouble
@@ -1116,7 +1181,8 @@ def scan_once():
     if scroll_step >= SWIPES_PER_PASS:
         reset_to_top()
         scroll_step = 0
-        print(f"{CYAN}[SCROLL] Pass reset.  Baselines: {len(baselines)}{RESET}")
+        save_baselines()
+        print(f"{CYAN}[SCROLL] Pass reset.  Baselines saved: {len(baselines)}{RESET}")
     else:
         scroll_down()
         pct = int(scroll_step / SWIPES_PER_PASS * 100)
@@ -1124,6 +1190,7 @@ def scan_once():
 
 
 def _scan_loop():
+    load_baselines()
     while True:
         try:
             scan_once()
