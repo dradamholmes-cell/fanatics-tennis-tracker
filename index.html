@@ -589,15 +589,30 @@ async function fetchLiveOdds() {
   if (demoMode) { showToast('Disable Demo Mode first.'); return; }
   if (!apiKey) { showToast('Enter your API key first.'); return; }
 
-  const SPORTS = ['tennis_atp', 'tennis_wta'];
+  const SPORTS = [
+    'tennis_atp_halle_open','tennis_atp_wimbledon','tennis_atp_queens_club_champ',
+    'tennis_atp_french_open','tennis_atp_us_open','tennis_atp_aus_open_singles',
+    'tennis_atp_canadian_open','tennis_atp_cincinnati_open','tennis_atp_indian_wells',
+    'tennis_atp_italian_open','tennis_atp_madrid_open','tennis_atp_monte_carlo_masters',
+    'tennis_atp_shanghai_masters','tennis_atp_paris_masters','tennis_atp_hamburg_open',
+    'tennis_atp_munich','tennis_atp_barcelona_open','tennis_atp_dubai','tennis_atp_qatar_open',
+    'tennis_atp_china_open',
+    'tennis_wta_german_open','tennis_wta_wimbledon','tennis_wta_queens_club_champ',
+    'tennis_wta_french_open','tennis_wta_us_open','tennis_wta_aus_open_singles',
+    'tennis_wta_canadian_open','tennis_wta_cincinnati_open','tennis_wta_indian_wells',
+    'tennis_wta_italian_open','tennis_wta_madrid_open','tennis_wta_strasbourg',
+    'tennis_wta_charleston_open','tennis_wta_stuttgart_open','tennis_wta_dubai',
+    'tennis_wta_qatar_open','tennis_wta_china_open','tennis_wta_wuhan_open','tennis_wta_miami_open',
+  ];
   const BOOKS  = ['fanatics', 'draftkings', 'fanduel'];
   const tbody  = document.getElementById('match-tbody');
-  tbody.innerHTML = '<tr><td colspan="8" class="text-center py-10" style="color:#64748b">Fetching ATP + WTA live odds…</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="8" class="text-center py-10" style="color:#64748b">Scanning all ATP + WTA tournament windows…</td></tr>';
 
   try {
     const fetches = SPORTS.map(sport => {
       const url = `https://api.the-odds-api.com/v4/sports/${sport}/odds/?apiKey=${apiKey}&regions=us&markets=h2h&oddsFormat=american&bookmakers=${BOOKS.join(',')}`;
       return fetch(url).then(res => {
+        if (res.status === 404 || res.status === 422) return [];
         if (!res.ok) return res.text().then(t => { throw new Error(`${sport} → HTTP ${res.status}: ${t}`); });
         return res.json();
       });
