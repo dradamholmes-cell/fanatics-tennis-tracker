@@ -5,12 +5,19 @@
 # =============================================================================
 
 import re
+import os
 import time
 import threading
 import subprocess
 import winsound
 from datetime import datetime
 from collections import defaultdict
+
+try:
+    from rapidfuzz import process as fuzz_process
+    FUZZ_AVAILABLE = True
+except ImportError:
+    FUZZ_AVAILABLE = False
 
 import numpy as np
 import cv2
@@ -87,6 +94,51 @@ GREEN  = "\033[92m"
 YELLOW = "\033[93m"
 CYAN   = "\033[96m"
 GREY   = "\033[90m"
+
+
+# =============================================================================
+#  PLAYER LIST  (for fuzzy name matching)
+# =============================================================================
+
+def _load_players() -> list[str]:
+    candidates = [
+        os.path.join(os.path.dirname(__file__), "players", "players.txt"),
+        r"C:\Users\Admin\AppData\Local\Temp\fanatics-repo\players\players.txt",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                return [l.strip() for l in f if l.strip()]
+    return []
+
+KNOWN_PLAYERS = _load_players()
+if KNOWN_PLAYERS:
+    print(f"{GREEN}[NAMES] Loaded {len(KNOWN_PLAYERS)} known players for fuzzy match.{RESET}")
+else:
+    print(f"{YELLOW}[NAMES] No players.txt found — fuzzy match disabled.{RESET}")
+
+
+def clean_name(raw: str) -> str:
+    """Strip OCR flag-icon garbage then fuzzy-match against known player list."""
+    # Remove leading junk: 1-4 chars of digits/uppercase that aren't a real name prefix
+    name = re.sub(r'^[\d]+[a-z]*\s*', '', raw)       # e.g. "1m" prefix
+    name = re.sub(r'^[A-Z]{2,4}(?=[A-Z][a-z])', '', name)  # e.g. "ISI" prefix
+    name = name.strip()
+
+    if not FUZZ_AVAILABLE or not KNOWN_PLAYERS or len(name) < 3:
+        return name
+
+    # Insert spaces before capital letters to help matching (AlexdeMinaur → Alex de Minaur)
+    spaced = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', name)
+
+    match, score, _ = fuzz_process.extractOne(
+        spaced, KNOWN_PLAYERS,
+        score_cutoff=72   # minimum confidence to accept a match
+    ) or (None, 0, None)
+
+    if match:
+        return match
+    return spaced   # return space-inserted version even if no match found
 
 
 # =============================================================================
@@ -638,8 +690,8 @@ def parse_matches(text_lines: list[str]) -> list[dict]:
     i = 0
     while i < len(candidate_rows) - 1:
         r1, r2 = candidate_rows[i], candidate_rows[i + 1]
-        p1 = _extract_name(r1["tokens"])
-        p2 = _extract_name(r2["tokens"])
+        p1 = clean_name(_extract_name(r1["tokens"]))
+        p2 = clean_name(_extract_name(r2["tokens"]))
         if not p1 or not p2:
             i += 1
             continue
