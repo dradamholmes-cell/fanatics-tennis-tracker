@@ -329,7 +329,10 @@ function renderTable() {
     return `<tr class="match-row ${rowClass}" onclick="selectMatch('${m.id}')" data-id="${m.id}">
       <td>
         <div class="font-semibold text-white">${m.p1} <span style="color:#475569">vs</span> ${m.p2}</div>
-        <div class="text-xs mt-0.5" style="color:#475569">ATP Wimbledon</div>
+        <div class="text-xs mt-0.5 flex items-center gap-1" style="color:#475569">
+          ${m.tourney || 'Tennis'}
+          ${m.fanHasLine === false ? '<span style="background:rgba(249,115,22,0.15);color:#fdba74;border:1px solid rgba(249,115,22,0.3);font-size:10px;padding:1px 5px;border-radius:4px;font-weight:600">No Fan line</span>' : ''}
+        </div>
       </td>
       <td>
         <span class="font-semibold text-white">Sets ${m.set}</span>
@@ -585,21 +588,31 @@ function saveApiKey() {
 async function fetchLiveOdds() {
   if (demoMode) { showToast('Disable Demo Mode first.'); return; }
   if (!apiKey) { showToast('Enter your API key first.'); return; }
-  const SPORTS = ['tennis_atp_wimbledon', 'tennis_wta_wimbledon'];
-  const BOOKS  = ['fanduel', 'draftkings', 'fanatics'];
+
+  const SPORTS = ['tennis_atp', 'tennis_wta'];
+  const BOOKS  = ['fanatics', 'draftkings', 'fanduel'];
   const tbody  = document.getElementById('match-tbody');
-  tbody.innerHTML = '<tr><td colspan="8" class="text-center py-10" style="color:#64748b">Fetching from The Odds API…</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="8" class="text-center py-10" style="color:#64748b">Fetching ATP + WTA live odds…</td></tr>';
 
   try {
-    let allEvents = [];
-    for (const sport of SPORTS) {
+    const fetches = SPORTS.map(sport => {
       const url = `https://api.the-odds-api.com/v4/sports/${sport}/odds/?apiKey=${apiKey}&regions=us&markets=h2h&oddsFormat=american&bookmakers=${BOOKS.join(',')}`;
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-      const data = await res.json();
-      allEvents = allEvents.concat(data);
+      return fetch(url).then(res => {
+        if (!res.ok) return res.text().then(t => { throw new Error(`${sport} → HTTP ${res.status}: ${t}`); });
+        return res.json();
+      });
+    });
+
+    const results = await Promise.all(fetches);
+    const allEvents = results.flat();
+
+    if (!allEvents.length) {
+      tbody.innerHTML = '<tr><td colspan="8" class="text-center py-10" style="color:#64748b">No live ATP/WTA matches on The Odds API right now. Try again during an active tournament window.</td></tr>';
+      return;
     }
-    if (!allEvents.length) { tbody.innerHTML = '<tr><td colspan="8" class="text-center py-10" style="color:#64748b">No live matches found on The Odds API right now.</td></tr>'; return; }
+
+    // Track pre-match baseline per event id (persists across refreshes in-session)
+    if (!window._preMatchBaseline) window._preMatchBaseline = {};
 
     matches = allEvents.map(ev => {
       const byBook = {};
@@ -609,25 +622,52 @@ async function fetchLiveOdds() {
         byBook[bm.key] = {};
         h2h.outcomes.forEach(o => { byBook[bm.key][o.name] = o.price; });
       });
-      const names = ev.home_team && ev.away_team ? [ev.home_team, ev.away_team] : ['Player 1', 'Player 2'];
-      const getOdds = (book, player) => byBook[book]?.[player] ?? (player === names[0] ? -110 : -110);
-      const fan = { p1: getOdds('fanatics', names[0]), p2: getOdds('fanatics', names[1]) };
-      const prob = impliedProb(fan.p1);
+
+      const names = [ev.home_team || 'Player 1', ev.away_team || 'Player 2'];
+      const getOdds = (book, player) => byBook[book]?.[player] ?? null;
+
+      // Use best available book for Fanatics if missing; fall back to DK then FD
+      const fanP1 = getOdds('fanatics', names[0]) ?? getOdds('draftkings', names[0]) ?? getOdds('fanduel', names[0]) ?? -110;
+      const fanP2 = getOdds('fanatics', names[1]) ?? getOdds('draftkings', names[1]) ?? getOdds('fanduel', names[1]) ?? -110;
+      const fan   = { p1: fanP1, p2: fanP2 };
+
+      // Anchor pre-match baseline on first fetch; never overwrite it this session
+      if (!window._preMatchBaseline[ev.id]) window._preMatchBaseline[ev.id] = { ...fan };
+      const pre = window._preMatchBaseline[ev.id];
+
+      const existingMatch = (matches || []).find(m => m.id === ev.id);
+      const probHistory = existingMatch ? [...existingMatch.probHistory, impliedProb(fan.p1)].slice(-50) : [impliedProb(pre.p1)];
+
+      // Derive tournament label from sport key and event name
+      const tourney = ev.sport_title || (ev.sport_key?.includes('wta') ? 'WTA' : 'ATP');
+
       return {
         id: ev.id,
         p1: names[0], p2: names[1],
+        tourney,
         set: 'Live', score: '–',
-        preOdds: { ...fan },
-        fanOdds: { ...fan },
-        dkOdds:  { p1: getOdds('draftkings', names[0]), p2: getOdds('draftkings', names[1]) },
-        fdOdds:  { p1: getOdds('fanduel', names[0]),    p2: getOdds('fanduel', names[1]) },
-        probHistory: [prob],
+        commenceTime: ev.commence_time,
+        preOdds: pre,
+        fanOdds: fan,
+        dkOdds:  { p1: getOdds('draftkings', names[0]) ?? fanP1, p2: getOdds('draftkings', names[1]) ?? fanP2 },
+        fdOdds:  { p1: getOdds('fanduel',    names[0]) ?? fanP1, p2: getOdds('fanduel',    names[1]) ?? fanP2 },
+        fanHasLine: getOdds('fanatics', names[0]) !== null,
+        probHistory,
       };
     });
+
+    // Sort: value alerts first, then alphabetically by tournament
+    matches.sort((a, b) => {
+      const da = Math.abs(impliedProb(a.fanOdds.p1) - impliedProb(a.preOdds.p1));
+      const db = Math.abs(impliedProb(b.fanOdds.p1) - impliedProb(b.preOdds.p1));
+      if (db !== da) return db - da;
+      return a.tourney.localeCompare(b.tourney);
+    });
+
     renderTable();
-    showToast(`Loaded ${matches.length} events.`);
+    showToast(`Loaded ${matches.length} ATP/WTA events across ${SPORTS.length} endpoints.`);
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="8" class="text-center py-8" style="color:#f87171">Error: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="text-center py-8" style="color:#f87171">Fetch error: ${e.message}</td></tr>`;
   }
 }
 
