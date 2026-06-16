@@ -45,6 +45,12 @@ try:
 except ImportError:
     TK_AVAILABLE = False
 
+try:
+    import keyboard as kb
+    KB_AVAILABLE = True
+except ImportError:
+    KB_AVAILABLE = False
+
 
 # =============================================================================
 #  USER CONFIGURATION
@@ -168,15 +174,15 @@ class Dashboard:
         self._build_ui()
         self._bind_keys()
 
-    # ── Keyboard shortcuts ───────────────────────────────────────────────────
+    # ── Keyboard shortcuts (global — work even when scrcpy has focus) ────────
 
     def _bind_keys(self):
-        self.root.bind("<space>",          lambda e: self._toggle_scroll())
-        self.root.bind("<Escape>",         lambda e: self._dismiss_alert())
-        self.root.bind("<r>",              lambda e: self._reset_baselines())
-        self.root.bind("<R>",              lambda e: self._reset_baselines())
-        self.root.bind("<s>",              lambda e: self._open_settings())
-        self.root.bind("<S>",              lambda e: self._open_settings())
+        if not KB_AVAILABLE:
+            return
+        kb.add_hotkey("space",  self._toggle_scroll,   suppress=False)
+        kb.add_hotkey("escape", self._dismiss_alert,   suppress=False)
+        kb.add_hotkey("r",      self._reset_baselines, suppress=False)
+        kb.add_hotkey("s",      lambda: self.root.after(0, self._open_settings), suppress=False)
 
     # ── UI build ─────────────────────────────────────────────────────────────
 
