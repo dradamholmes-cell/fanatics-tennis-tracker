@@ -6,10 +6,13 @@
 
 import re
 import os
+import json
 import time
 import threading
 import subprocess
 import winsound
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from collections import defaultdict
 
@@ -30,6 +33,12 @@ try:
     CAPTURE_AVAILABLE = True
 except ImportError:
     CAPTURE_AVAILABLE = False
+
+try:
+    import mss
+    MSS_AVAILABLE = True
+except ImportError:
+    MSS_AVAILABLE = False
 
 try:
     import pytesseract
@@ -58,6 +67,7 @@ except ImportError:
 
 SIMULATION_MODE      = False
 WINDOW_TITLE         = "ZB30"
+CAPTURE_MONITOR      = 2      # mss monitor index: 1=primary, 2=second monitor, 0=all screens
 
 SCAN_INTERVAL_SEC    = 0
 DELTA_THRESHOLD_PCT  = 12.0
@@ -83,6 +93,26 @@ MATCHES_PER_VIEW     = 7
 TOTAL_MATCHES_EST    = 112
 SWIPES_PER_PASS      = (TOTAL_MATCHES_EST // MATCHES_PER_VIEW) + 4
 
+# ── Cross-book arbitrage (The Odds API) ───────────────────────────────────────
+ODDS_API_KEY    = ""     # Paste your key here — same one used in index.html
+ARB_GAP_PP      = 3.0   # Minimum pp gap between Fanatics and another book to flag
+ARB_CACHE_TTL   = 60    # Seconds before the API response cache expires
+
+TENNIS_SPORT_KEYS = [
+    "tennis_atp_halle_open", "tennis_atp_wimbledon", "tennis_atp_queens_club_champ",
+    "tennis_atp_french_open", "tennis_atp_us_open", "tennis_atp_aus_open_singles",
+    "tennis_atp_canadian_open", "tennis_atp_cincinnati_open", "tennis_atp_indian_wells",
+    "tennis_atp_italian_open", "tennis_atp_madrid_open", "tennis_atp_monte_carlo_masters",
+    "tennis_atp_shanghai_masters", "tennis_atp_paris_masters", "tennis_atp_hamburg_open",
+    "tennis_atp_munich", "tennis_atp_barcelona_open", "tennis_atp_dubai", "tennis_atp_qatar_open",
+    "tennis_atp_china_open",
+    "tennis_wta_german_open", "tennis_wta_wimbledon", "tennis_wta_french_open",
+    "tennis_wta_us_open", "tennis_wta_aus_open_singles", "tennis_wta_canadian_open",
+    "tennis_wta_cincinnati_open", "tennis_wta_indian_wells", "tennis_wta_italian_open",
+    "tennis_wta_madrid_open", "tennis_wta_strasbourg", "tennis_wta_charleston_open",
+    "tennis_wta_stuttgart_open", "tennis_wta_dubai", "tennis_wta_miami_open",
+]
+
 
 # =============================================================================
 #  GLOBAL STATE
@@ -97,6 +127,9 @@ WARMUP_VARIANCE  = 5.0    # max pp spread across warmup readings to be considere
 scroll_step      = 0
 _adb_ok          = None
 scrolling_enabled = True      # toggled by the UI button
+
+_arb_cache = {"ts": 0.0, "events": []}
+_arb_lock  = threading.Lock()
 
 # =============================================================================
 #  BASELINE PERSISTENCE
@@ -317,34 +350,53 @@ class Dashboard:
         w.focus_set()
 
         # Layout
-        tk.Label(w, text="🚨  BET ALERT  🚨",
+        tk.Label(w, text="🚨  SHARP MONEY DETECTED  🚨",
                  bg="#8b0000", fg="white",
-                 font=("Segoe UI", 48, "bold")).pack(pady=(80, 20))
+                 font=("Segoe UI", 36, "bold")).pack(pady=(50, 4))
 
-        tk.Label(w, text=f"BET ON:   {opponent}",
-                 bg="#8b0000", fg="#ffff00",
-                 font=("Segoe UI", 56, "bold")).pack(pady=10)
-
-        tk.Label(w, text=f"CURRENT ODDS:   {'+' if opp_odds > 0 else ''}{opp_odds}",
-                 bg="#8b0000", fg="white",
-                 font=("Segoe UI", 40)).pack(pady=6)
-
-        tk.Frame(w, bg="#cc0000", height=3).pack(fill="x", pady=20, padx=80)
-
-        detail = (f"Why:  {player} dropped {delta:.0f}pp\n"
-                  f"Was {base_prob:.0f}% to win  →  Now {live_prob:.0f}%\n"
-                  f"Match:  {match_key.replace('|', ' vs ')}")
-        tk.Label(w, text=detail,
+        # ── BET line — big and yellow, zero ambiguity ─────────────────────────
+        tk.Label(w, text="BET ON:",
                  bg="#8b0000", fg="#fca5a5",
-                 font=("Segoe UI", 22),
-                 justify="center").pack(pady=10)
+                 font=("Segoe UI", 22)).pack(pady=(14, 0))
+
+        tk.Label(w, text=opponent,
+                 bg="#8b0000", fg="#ffff00",
+                 font=("Segoe UI", 72, "bold")).pack(pady=0)
+
+        opp_odds_str = f"+{opp_odds}" if opp_odds > 0 else str(opp_odds)
+        tk.Label(w, text=f"Fanatics odds:  {opp_odds_str}",
+                 bg="#8b0000", fg="white",
+                 font=("Segoe UI", 32)).pack(pady=4)
+
+        tk.Frame(w, bg="#cc0000", height=3).pack(fill="x", pady=14, padx=80)
+
+        # ── Why section — explicit cause → effect logic ───────────────────────
+        cause = (f"{player}  collapsed:   {base_prob:.0f}%  →  {live_prob:.0f}%  "
+                 f"(−{delta:.0f} pp implied)")
+        tk.Label(w, text=cause,
+                 bg="#8b0000", fg="#fca5a5",
+                 font=("Segoe UI", 18),
+                 justify="center").pack(pady=2)
+
+        tk.Label(w,
+                 text=f"↓  market moved against {player}  →  {opponent} is VALUE  ↓",
+                 bg="#8b0000", fg="#fdba74",
+                 font=("Segoe UI", 16, "italic")).pack(pady=2)
+
+        tk.Label(w, text=f"Match:  {match_key.replace('|', ' vs ')}",
+                 bg="#8b0000", fg="#7f1d1d",
+                 font=("Segoe UI", 14)).pack(pady=(6, 0))
+
+        # ── Arb placeholder — filled in async by show_arb_info ────────────────
+        self._arb_frame = tk.Frame(w, bg="#8b0000")
+        self._arb_frame.pack(fill="x", padx=80, pady=8)
 
         tk.Label(w, text="Press any key or click to dismiss",
                  bg="#8b0000", fg="#7f1d1d",
-                 font=("Segoe UI", 14)).pack(pady=(40, 0))
+                 font=("Segoe UI", 13)).pack(pady=(8, 0))
 
-        # Auto-dismiss after 45s
-        w.after(45000, self._dismiss_alert)
+        # Auto-dismiss after 60s
+        w.after(60000, self._dismiss_alert)
 
     def _dismiss_alert(self):
         if self._alert_window:
@@ -353,6 +405,77 @@ class Dashboard:
             except Exception:
                 pass
             self._alert_window = None
+        self._arb_frame = None
+
+    def show_arb_info(self, arb: dict, target_player: str):
+        """Populate the arb section of the active alert window. Called from main thread."""
+        if not self._alert_window or not hasattr(self, "_arb_frame") or not self._arb_frame:
+            return
+
+        BOOK_LABELS = {"fanatics": "Fanatics", "draftkings": "DraftKings", "fanduel": "FanDuel"}
+
+        # Determine which side of the API match corresponds to target_player
+        p1_api = arb["p1"]
+        p2_api = arb["p2"]
+        is_p1 = True
+        if FUZZ_AVAILABLE:
+            r = fuzz_process.extractOne(target_player, [p1_api, p2_api], score_cutoff=50)
+            is_p1 = bool(r and r[0] == p1_api)
+
+        fan_data  = arb["books"].get("fanatics", {})
+        fan_odds  = fan_data.get("p1_odds" if is_p1 else "p2_odds")
+        fan_impl  = american_to_implied(fan_odds) if fan_odds is not None else None
+
+        lines = []
+        best_book  = None
+        best_odds  = None
+
+        for book, data in arb["books"].items():
+            odds = data.get("p1_odds" if is_p1 else "p2_odds")
+            if odds is None:
+                continue
+            impl      = american_to_implied(odds)
+            odds_str  = f"+{odds}" if odds > 0 else str(odds)
+            label     = BOOK_LABELS.get(book, book)
+            gap_tag   = ""
+            if fan_impl is not None and book != "fanatics":
+                gap = fan_impl - impl   # positive = Fanatics already moved, DK/FD haven't
+                if gap >= ARB_GAP_PP:
+                    gap_tag = f"  ← {gap:.1f}pp gap — BET HERE"
+                elif gap <= -ARB_GAP_PP:
+                    gap_tag = "  ← Fanatics is behind other books"
+            lines.append(f"  {label:<13}{odds_str:>7}   ({impl:.1f}%){gap_tag}")
+            if best_odds is None or odds > best_odds:
+                best_odds = odds
+                best_book = label
+
+        if not lines:
+            return
+
+        try:
+            f = self._arb_frame
+            tk.Frame(f, bg="#660000", height=2).pack(fill="x", pady=(0, 6))
+            tk.Label(f,
+                     text=f"Cross-book check — {target_player}",
+                     bg="#8b0000", fg="#fcd34d",
+                     font=("Segoe UI", 15, "bold")).pack()
+            tk.Label(f,
+                     text="\n".join(lines),
+                     bg="#8b0000", fg="#fde68a",
+                     font=("Courier New", 13),
+                     justify="left").pack(pady=2)
+            if best_book and best_book != "Fanatics":
+                tk.Label(f,
+                         text=f"Best odds:  {best_book}  →  consider betting there",
+                         bg="#8b0000", fg="#4ade80",
+                         font=("Segoe UI", 13, "bold")).pack(pady=2)
+            elif best_book == "Fanatics":
+                tk.Label(f,
+                         text="Fanatics has the best line — books agree, signal confirmed.",
+                         bg="#8b0000", fg="#86efac",
+                         font=("Segoe UI", 12)).pack(pady=2)
+        except Exception:
+            pass
 
     # ── Settings panel ───────────────────────────────────────────────────────
 
@@ -758,19 +881,41 @@ def parse_sim_matches() -> list[dict]:
 
 
 # =============================================================================
-#  WINDOW CAPTURE
+#  CAPTURE  (mss monitor → pyautogui window fallback)
 # =============================================================================
 
 BLACK_THRESH = 18
 
 
-def capture_window(title: str) -> Image.Image | None:
+def capture_frame() -> Image.Image | None:
+    """Grab the source image.
+
+    Primary: mss full-screen grab of CAPTURE_MONITOR (fast, no focus steal).
+    Fallback: pyautogui window grab of WINDOW_TITLE (used if mss unavailable
+              or the requested monitor index doesn't exist).
+    """
+    if MSS_AVAILABLE:
+        try:
+            with mss.mss() as sct:
+                monitors = sct.monitors   # [0]=all, [1]=primary, [2]=second, …
+                if CAPTURE_MONITOR < len(monitors):
+                    shot = sct.grab(monitors[CAPTURE_MONITOR])
+                    return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+                print(f"{YELLOW}[WARN] Monitor {CAPTURE_MONITOR} not found "
+                      f"({len(monitors)-1} monitor(s) detected) — falling back to window capture.{RESET}")
+        except Exception as e:
+            print(f"{YELLOW}[WARN] mss capture failed ({e}) — falling back to window capture.{RESET}")
+
+    return _capture_window_fallback()
+
+
+def _capture_window_fallback() -> Image.Image | None:
     if not CAPTURE_AVAILABLE:
         return None
     wins = [w for w in gw.getAllWindows()
-            if title.lower() in w.title.lower() and w.width > 20]
+            if WINDOW_TITLE.lower() in w.title.lower() and w.width > 20]
     if not wins:
-        print(f"{YELLOW}[WARN] Window '{title}' not found.{RESET}")
+        print(f"{YELLOW}[WARN] Window '{WINDOW_TITLE}' not found.{RESET}")
         return None
     win = wins[0]
     try:
@@ -959,15 +1104,110 @@ def fire_alert(match_key: str, player: str, delta: float,
     ts = datetime.now().strftime("%H:%M:%S")
     opp_odds_str = f"+{opp_odds}" if opp_odds > 0 else str(opp_odds)
     print(f"\n{RED}{'#' * 64}{RESET}")
-    print(f"{RED}#  BET ALERT  [{ts}]{'':<42}#{RESET}")
-    print(f"{RED}#  BET ON : {BOLD}{opponent:<51}{RESET}{RED}#{RESET}")
-    print(f"{RED}#  ODDS   : {opp_odds_str:<52}#{RESET}")
-    print(f"{RED}#  Why    : {player} dropped {delta:.0f}pp ({base_prob:.0f}% → {live_prob:.0f}%){'':<18}#{RESET}")
+    print(f"{RED}#  SHARP MONEY DETECTED  [{ts}]{'':<31}#{RESET}")
+    print(f"{RED}#  BET ON  : {BOLD}{opponent:<50}{RESET}{RED}#{RESET}")
+    print(f"{RED}#  ODDS    : {opp_odds_str:<52}#{RESET}")
+    print(f"{RED}#  BECAUSE : {player} collapsed  {base_prob:.0f}% → {live_prob:.0f}%  (−{delta:.0f}pp){'':<10}#{RESET}")
     print(f"{RED}{'#' * 64}{RESET}\n")
 
     if _dash:
         _dash.show_alert(player, match_key, delta, live_prob, base_prob,
                          live_odds, opponent, opp_odds)
+
+    if ODDS_API_KEY:
+        p1, p2 = match_key.split("|", 1)
+        threading.Thread(
+            target=_arb_check_and_update, args=(p1, p2, opponent),
+            daemon=True
+        ).start()
+
+
+# =============================================================================
+#  CROSS-BOOK ARBITRAGE
+# =============================================================================
+
+def _fetch_sport_events(sport: str) -> list:
+    url = (
+        f"https://api.the-odds-api.com/v4/sports/{sport}/odds/"
+        f"?apiKey={ODDS_API_KEY}&regions=us&markets=h2h"
+        f"&oddsFormat=american&bookmakers=fanatics,draftkings,fanduel"
+    )
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "tennis-tracker/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read()) if r.status == 200 else []
+    except Exception:
+        return []
+
+
+def _refresh_arb_cache():
+    """Fetch all active tennis events in parallel. No-op if cache is still fresh."""
+    if not ODDS_API_KEY:
+        return
+    with _arb_lock:
+        if time.time() - _arb_cache["ts"] < ARB_CACHE_TTL:
+            return
+    print(f"{CYAN}[ARB] Fetching cross-book odds…{RESET}")
+    all_events = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(_fetch_sport_events, s): s for s in TENNIS_SPORT_KEYS}
+        for fut in as_completed(futures):
+            all_events.extend(fut.result())
+    with _arb_lock:
+        _arb_cache["ts"] = time.time()
+        _arb_cache["events"] = all_events
+    print(f"{CYAN}[ARB] Cached {len(all_events)} events from The Odds API.{RESET}")
+
+
+def _find_arb(player1: str, player2: str) -> dict | None:
+    """Fuzzy-match a match against the arb cache and return structured odds by book."""
+    with _arb_lock:
+        events = list(_arb_cache["events"])
+    if not events or not FUZZ_AVAILABLE:
+        return None
+
+    best_ev    = None
+    best_score = 0
+    for ev in events:
+        h = ev.get("home_team", "")
+        a = ev.get("away_team", "")
+        r1 = fuzz_process.extractOne(player1, [h, a], score_cutoff=55)
+        r2 = fuzz_process.extractOne(player2, [h, a], score_cutoff=55)
+        score = (r1[1] if r1 else 0) + (r2[1] if r2 else 0)
+        if score > best_score:
+            best_score = score
+            best_ev    = ev
+
+    if not best_ev or best_score < 90:
+        return None
+
+    h_name = best_ev["home_team"]
+    a_name = best_ev["away_team"]
+    by_book: dict = {}
+    for bm in best_ev.get("bookmakers", []):
+        h2h = next((mk for mk in bm.get("markets", []) if mk["key"] == "h2h"), None)
+        if h2h:
+            by_book[bm["key"]] = {o["name"]: o["price"] for o in h2h["outcomes"]}
+
+    result: dict = {"p1": h_name, "p2": a_name, "books": {}}
+    for book in ("fanatics", "draftkings", "fanduel"):
+        bdata = by_book.get(book)
+        if bdata:
+            result["books"][book] = {
+                "p1_odds": bdata.get(h_name),
+                "p2_odds": bdata.get(a_name),
+            }
+    return result if result["books"] else None
+
+
+def _arb_check_and_update(p1: str, p2: str, target_player: str):
+    """Background thread: refresh cache, find match, push arb info to alert window."""
+    _refresh_arb_cache()
+    arb = _find_arb(p1, p2)
+    if arb and _dash:
+        _dash.root.after(0, _dash.show_arb_info, arb, target_player)
+    elif _dash and ODDS_API_KEY:
+        print(f"{YELLOW}[ARB] Match not found on The Odds API: {p1} / {p2}{RESET}")
 
 
 # =============================================================================
@@ -1168,7 +1408,7 @@ def scan_once():
         process_matches(match_list)
         return
 
-    img = capture_window(WINDOW_TITLE)
+    img = capture_frame()
     if img is None:
         return
 
@@ -1199,7 +1439,25 @@ def _scan_loop():
         time.sleep(SCAN_INTERVAL_SEC)
 
 
+def _print_startup_info():
+    print(f"{CYAN}{'=' * 56}{RESET}")
+    print(f"{CYAN}  Tennis Odds Tracker — startup diagnostics{RESET}")
+    if MSS_AVAILABLE:
+        with mss.mss() as sct:
+            for i, m in enumerate(sct.monitors):
+                tag = f"  ← CAPTURE_MONITOR = {i}" if i == CAPTURE_MONITOR else ""
+                label = "all screens" if i == 0 else f"monitor {i}"
+                print(f"{CYAN}  mss[{i}]  {label:14}  {m['width']}×{m['height']}  "
+                      f"at ({m['left']},{m['top']}){tag}{RESET}")
+    else:
+        print(f"{YELLOW}  mss not installed — run: pip install mss{RESET}")
+        print(f"{YELLOW}  Falling back to window capture ('{WINDOW_TITLE}'){RESET}")
+    print(f"{CYAN}{'=' * 56}{RESET}")
+
+
 def main():
+    _print_startup_info()
+
     if not SIMULATION_MODE:
         if not CAPTURE_AVAILABLE:
             print(f"{RED}[ERROR] Install pygetwindow + pyautogui.{RESET}")
