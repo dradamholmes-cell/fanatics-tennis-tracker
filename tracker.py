@@ -124,8 +124,9 @@ last_alert_at    = defaultdict(float)
 BASELINES_FILE   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "baselines.json")
 WARMUP_SCANS     = 3      # number of consistent readings before baseline locks in
 WARMUP_VARIANCE  = 5.0    # max pp spread across warmup readings to be considered stable
-scroll_step      = 0
-_adb_ok          = None
+scroll_step       = 0
+_empty_frame_count = 0        # consecutive frames with zero matches (end-of-list detector)
+_adb_ok           = None
 scrolling_enabled = True      # toggled by the UI button
 
 _arb_cache = {"ts": 0.0, "events": []}
@@ -137,12 +138,15 @@ _arb_lock  = threading.Lock()
 
 def save_baselines():
     try:
-        import json
-        # history contains floats/ints — safe to serialise
         with open(BASELINES_FILE, "w") as f:
             json.dump(baselines, f)
     except Exception as e:
         print(f"{YELLOW}[SAVE] Could not save baselines: {e}{RESET}")
+
+
+def save_baselines_async():
+    """Fire-and-forget baseline save — don't stall the scan loop on HDD write."""
+    threading.Thread(target=save_baselines, daemon=True).start()
 
 
 def load_baselines():
@@ -1400,12 +1404,23 @@ def process_matches(match_list: list[dict]):
 # =============================================================================
 
 def scan_once():
-    global scroll_step
+    global scroll_step, _empty_frame_count
 
     if SIMULATION_MODE:
         drift_sim_state()
         match_list = parse_sim_matches()
         process_matches(match_list)
+        return
+
+    # ── Reset check BEFORE OCR ────────────────────────────────────────────────
+    # OCR is expensive (3-5s on HDD hardware). Don't waste a cycle OCR-ing the
+    # empty bottom of the list — check the boundary first and reset immediately.
+    if scroll_step >= SWIPES_PER_PASS:
+        reset_to_top()
+        scroll_step = 0
+        _empty_frame_count = 0
+        save_baselines_async()
+        print(f"{CYAN}[SCROLL] Pass reset.  ({len(baselines)} baselines queued to save){RESET}")
         return
 
     img = capture_frame()
@@ -1415,18 +1430,26 @@ def scan_once():
     img_cropped = crop_content(img)
     text_lines  = ocr_image(img_cropped)
     match_list  = parse_matches(text_lines)
+
+    # ── Early end-of-list detection ───────────────────────────────────────────
+    # If 2 consecutive frames return zero matches and we're past the halfway
+    # point, we've scrolled past all live matches — reset immediately rather
+    # than burning more OCR cycles on empty chrome.
+    if not match_list:
+        _empty_frame_count += 1
+        if _empty_frame_count >= 2 and scroll_step > SWIPES_PER_PASS // 2:
+            print(f"{CYAN}[SCROLL] End of list at step {scroll_step}/{SWIPES_PER_PASS} — resetting early.{RESET}")
+            scroll_step = SWIPES_PER_PASS  # triggers reset at top of next cycle
+            return
+    else:
+        _empty_frame_count = 0
+
     process_matches(match_list)
 
     scroll_step += 1
-    if scroll_step >= SWIPES_PER_PASS:
-        reset_to_top()
-        scroll_step = 0
-        save_baselines()
-        print(f"{CYAN}[SCROLL] Pass reset.  Baselines saved: {len(baselines)}{RESET}")
-    else:
-        scroll_down()
-        pct = int(scroll_step / SWIPES_PER_PASS * 100)
-        print(f"{GREY}[SCROLL] Step {scroll_step}/{SWIPES_PER_PASS}  ({pct}%){RESET}")
+    scroll_down()
+    pct = int(scroll_step / SWIPES_PER_PASS * 100)
+    print(f"{GREY}[SCROLL] Step {scroll_step}/{SWIPES_PER_PASS}  ({pct}%){RESET}")
 
 
 def _scan_loop():
