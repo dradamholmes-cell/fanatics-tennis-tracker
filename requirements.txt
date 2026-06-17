@@ -1,0 +1,9 @@
+numpy
+opencv-python
+Pillow
+pytesseract
+pygetwindow
+pyautogui
+rapidfuzz
+keyboard
+mss

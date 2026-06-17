@@ -1439,7 +1439,25 @@ def _scan_loop():
         time.sleep(SCAN_INTERVAL_SEC)
 
 
+def _print_startup_info():
+    print(f"{CYAN}{'=' * 56}{RESET}")
+    print(f"{CYAN}  Tennis Odds Tracker — startup diagnostics{RESET}")
+    if MSS_AVAILABLE:
+        with mss.mss() as sct:
+            for i, m in enumerate(sct.monitors):
+                tag = f"  ← CAPTURE_MONITOR = {i}" if i == CAPTURE_MONITOR else ""
+                label = "all screens" if i == 0 else f"monitor {i}"
+                print(f"{CYAN}  mss[{i}]  {label:14}  {m['width']}×{m['height']}  "
+                      f"at ({m['left']},{m['top']}){tag}{RESET}")
+    else:
+        print(f"{YELLOW}  mss not installed — run: pip install mss{RESET}")
+        print(f"{YELLOW}  Falling back to window capture ('{WINDOW_TITLE}'){RESET}")
+    print(f"{CYAN}{'=' * 56}{RESET}")
+
+
 def main():
+    _print_startup_info()
+
     if not SIMULATION_MODE:
         if not CAPTURE_AVAILABLE:
             print(f"{RED}[ERROR] Install pygetwindow + pyautogui.{RESET}")
