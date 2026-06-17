@@ -124,10 +124,13 @@ last_alert_at    = defaultdict(float)
 BASELINES_FILE   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "baselines.json")
 WARMUP_SCANS     = 3      # number of consistent readings before baseline locks in
 WARMUP_VARIANCE  = 5.0    # max pp spread across warmup readings to be considered stable
-scroll_step       = 0
-_empty_frame_count = 0        # consecutive frames with zero matches (end-of-list detector)
+scroll_step       = 0        # kept for compatibility — no longer drives scroll logic
+_scroll_dir       = 1        # 1 = scrolling down, -1 = scrolling up
+_prev_keys        = frozenset()   # match keys from last frame (resistance detector)
+_stall_count      = 0             # consecutive frames with same/empty content
+STALL_LIMIT       = 2             # frames before declaring resistance and flipping
 _adb_ok           = None
-scrolling_enabled = True      # toggled by the UI button
+scrolling_enabled = True
 
 _arb_cache = {"ts": 0.0, "events": []}
 _arb_lock  = threading.Lock()
@@ -749,27 +752,24 @@ def _post_scroll(hwnd: int, notches: int):
     _user32.PostMessageW(hwnd, WM_MOUSEWHEEL, wparam, 0)
 
 
-def scroll_down():
+def _scroll_one_step():
+    """Scroll one step in the current direction (_scroll_dir: 1=down, -1=up)."""
     if not scrolling_enabled:
         return
     if USE_ADB_SCROLL and _adb_available():
+        y1, y2 = (SWIPE_FROM_Y, SWIPE_TO_Y) if _scroll_dir == 1 else (SWIPE_TO_Y, SWIPE_FROM_Y)
         subprocess.run(
-            f'adb shell input swipe {SWIPE_X} {SWIPE_FROM_Y} {SWIPE_X} {SWIPE_TO_Y} {SWIPE_DURATION_MS}',
+            f'adb shell input swipe {SWIPE_X} {y1} {SWIPE_X} {y2} {SWIPE_DURATION_MS}',
             shell=True, capture_output=True, timeout=5)
     else:
         win = _get_window()
         if win:
-            cx = win.left + win.width  // 2
-            cy = win.top  + win.height // 2
-            pyautogui.moveTo(cx, cy, duration=0)
-            _post_scroll(win._hWnd, SCROLL_CLICKS)
+            _post_scroll(win._hWnd, SCROLL_CLICKS * _scroll_dir)
     time.sleep(SCROLL_SETTLE_SEC)
 
 
 def reset_to_top():
-    if not scrolling_enabled:
-        return
-    print(f"{CYAN}[SCROLL] Pass complete — resetting to top…{RESET}")
+    """Slam to the top of the list — used once at startup."""
     if USE_ADB_SCROLL and _adb_available():
         subprocess.run(
             f'adb shell input tap {LIVE_TAB_X} {LIVE_TAB_Y}',
@@ -779,7 +779,7 @@ def reset_to_top():
         win = _get_window()
         if win:
             for _ in range(30):
-                _post_scroll(win._hWnd, 10)   # scroll up
+                _post_scroll(win._hWnd, 10)
         time.sleep(0.8)
 
 
@@ -1391,11 +1391,11 @@ def process_matches(match_list: list[dict]):
             tier_order.get(r["tier"], 3),
             -max(r["d1"], r["d2"])
         ))
-        scroll_pct = int(scroll_step / max(SWIPES_PER_PASS, 1) * 100)
-        attack_n = sum(1 for r in dashboard_rows if r["tier"] == "ATTACK")
-        watch_n  = sum(1 for r in dashboard_rows if r["tier"] == "WATCH")
-        status   = (f"🔴 {attack_n} ATTACK  🟡 {watch_n} WATCH  |  "
-                    f"scan {scroll_pct}%  |  {len(baselines)} baselines")
+        attack_n  = sum(1 for r in dashboard_rows if r["tier"] == "ATTACK")
+        watch_n   = sum(1 for r in dashboard_rows if r["tier"] == "WATCH")
+        dir_label = "↓ DOWN" if _scroll_dir == 1 else "↑ UP"
+        status    = (f"🔴 {attack_n} ATTACK  🟡 {watch_n} WATCH  |  "
+                     f"{dir_label}  |  {len(baselines)} baselines")
         _dash.update_matches(dashboard_rows, status)
 
 
@@ -1404,7 +1404,7 @@ def process_matches(match_list: list[dict]):
 # =============================================================================
 
 def scan_once():
-    global scroll_step, _empty_frame_count
+    global _scroll_dir, _prev_keys, _stall_count
 
     if SIMULATION_MODE:
         drift_sim_state()
@@ -1412,48 +1412,40 @@ def scan_once():
         process_matches(match_list)
         return
 
-    # ── Reset check BEFORE OCR ────────────────────────────────────────────────
-    # OCR is expensive (3-5s on HDD hardware). Don't waste a cycle OCR-ing the
-    # empty bottom of the list — check the boundary first and reset immediately.
-    if scroll_step >= SWIPES_PER_PASS:
-        reset_to_top()
-        scroll_step = 0
-        _empty_frame_count = 0
-        save_baselines_async()
-        print(f"{CYAN}[SCROLL] Pass reset.  ({len(baselines)} baselines queued to save){RESET}")
-        return
-
     img = capture_frame()
     if img is None:
         return
 
-    img_cropped = crop_content(img)
-    text_lines  = ocr_image(img_cropped)
-    match_list  = parse_matches(text_lines)
+    img_cropped  = crop_content(img)
+    text_lines   = ocr_image(img_cropped)
+    match_list   = parse_matches(text_lines)
+    current_keys = frozenset(f"{m['p1']}|{m['p2']}" for m in match_list)
 
-    # ── Early end-of-list detection ───────────────────────────────────────────
-    # If 2 consecutive frames return zero matches and we're past the halfway
-    # point, we've scrolled past all live matches — reset immediately rather
-    # than burning more OCR cycles on empty chrome.
-    if not match_list:
-        _empty_frame_count += 1
-        if _empty_frame_count >= 2 and scroll_step > SWIPES_PER_PASS // 2:
-            print(f"{CYAN}[SCROLL] End of list at step {scroll_step}/{SWIPES_PER_PASS} — resetting early.{RESET}")
-            scroll_step = SWIPES_PER_PASS  # triggers reset at top of next cycle
-            return
+    # ── Resistance detection ──────────────────────────────────────────────────
+    # Same content as the previous frame (or empty screen) means the scroll hit
+    # an end — flip direction immediately. No fixed step counter needed.
+    if current_keys == _prev_keys or not current_keys:
+        _stall_count += 1
+        if _stall_count >= STALL_LIMIT:
+            _scroll_dir *= -1
+            _stall_count  = 0
+            _prev_keys    = frozenset()
+            label = "↓ DOWN" if _scroll_dir == 1 else "↑ UP"
+            print(f"{CYAN}[SCROLL] Resistance — switching to {label}{RESET}")
+            save_baselines_async()
     else:
-        _empty_frame_count = 0
+        _stall_count = 0
+        _prev_keys   = current_keys
 
-    process_matches(match_list)
+    if match_list:
+        process_matches(match_list)
 
-    scroll_step += 1
-    scroll_down()
-    pct = int(scroll_step / SWIPES_PER_PASS * 100)
-    print(f"{GREY}[SCROLL] Step {scroll_step}/{SWIPES_PER_PASS}  ({pct}%){RESET}")
+    _scroll_one_step()
 
 
 def _scan_loop():
     load_baselines()
+    reset_to_top()   # always start from the top of the list
     while True:
         try:
             scan_once()
