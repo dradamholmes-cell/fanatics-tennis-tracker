@@ -71,6 +71,7 @@ CAPTURE_MONITOR      = 2      # mss monitor index: 1=primary, 2=second monitor, 
 
 SCAN_INTERVAL_SEC    = 0
 OCR_ROW_HEIGHT_PX    = 55     # strip height in the 2× preprocessed image; tune if lines get split
+FAST_SCAN_INTERVAL_SEC = 5.0  # how often the hot-scan thread re-checks WATCH/ATTACK matches
 DELTA_THRESHOLD_PCT  = 12.0
 ALERT_BEEP_FREQ      = 1200
 ALERT_BEEP_DURATION  = 600
@@ -135,6 +136,9 @@ scrolling_enabled = True
 
 _arb_cache = {"ts": 0.0, "events": []}
 _arb_lock  = threading.Lock()
+
+_hot_matches: set = set()    # match keys currently in WATCH or ATTACK tier
+_hot_lock    = threading.Lock()
 
 # =============================================================================
 #  BASELINE PERSISTENCE
@@ -1302,6 +1306,85 @@ def _engage_lock_on(match_key: str):
 
 
 # =============================================================================
+#  HOT-MATCH FAST RESCAN
+# =============================================================================
+
+def _process_hot_only(match_list: list[dict]):
+    """Like process_matches but only runs alert/history logic — no dashboard update.
+    Used by the hot-scan thread so it doesn't clobber the main match table."""
+    for m in match_list:
+        p1, p2 = m["p1"], m["p2"]
+        o1, o2 = m["p1_odds"], m["p2_odds"]
+        key    = f"{p1}|{p2}"
+
+        if key not in baselines:
+            continue   # never create baselines from the fast scan
+
+        base = baselines[key]
+        if base["quality"] in ("MID_MATCH", "WARMUP"):
+            continue
+
+        prob1 = american_to_implied(o1)
+        prob2 = american_to_implied(o2)
+
+        d1 = base["p1_prob"] - prob1
+        d2 = base["p2_prob"] - prob2
+        _update_history(base, prob1, prob2)
+
+        worst_delta = max(d1, d2)
+        vel  = _velocity(base)
+        tier = _tier(worst_delta, vel, mid_match=False)
+
+        with _hot_lock:
+            if tier in ("WATCH", "ATTACK"):
+                _hot_matches.add(key)
+            else:
+                _hot_matches.discard(key)
+
+        tier_tag = (f"{RED}[ATTACK]{RESET}" if tier == "ATTACK"
+                    else f"{YELLOW}[WATCH]{RESET}" if tier == "WATCH" else "")
+        print(f"  [HOT] {p1} vs {p2}  Δ{worst_delta:.1f}pp  {vel:+.1f}pp/min  {tier_tag}")
+
+        if tier == "ATTACK":
+            _engage_lock_on(key)
+        if d1 >= DELTA_THRESHOLD_PCT:
+            fire_alert(key, p1, d1, prob1, base["p1_prob"], o1, p2, o2)
+        if d2 >= DELTA_THRESHOLD_PCT:
+            fire_alert(key, p2, d2, prob2, base["p2_prob"], o2, p1, o1)
+
+
+def _hot_scan_loop():
+    """Background thread: every FAST_SCAN_INTERVAL_SEC, grab the current frame
+    and reprocess any hot (WATCH/ATTACK) matches that happen to be on screen.
+    Skips when scroll is paused (ATTACK lock-on) since the main loop already
+    rescans continuously at that point."""
+    while True:
+        time.sleep(FAST_SCAN_INTERVAL_SEC)
+
+        with _hot_lock:
+            hot = set(_hot_matches)
+        if not hot or SIMULATION_MODE:
+            continue
+        if not scrolling_enabled:
+            continue   # main scan loop covers this — don't double-OCR
+
+        try:
+            img = capture_frame()
+            if img is None:
+                continue
+            text_lines   = ocr_image(crop_content(img))
+            match_list   = parse_matches(text_lines)
+            hot_visible  = [m for m in match_list
+                            if f"{m['p1']}|{m['p2']}" in hot]
+            if hot_visible:
+                ts = datetime.now().strftime("%H:%M:%S")
+                print(f"{CYAN}[HOT-SCAN {ts}]  {len(hot_visible)} hot match(es) on screen{RESET}")
+                _process_hot_only(hot_visible)
+        except Exception as e:
+            print(f"{RED}[HOT-SCAN] {e}{RESET}")
+
+
+# =============================================================================
 #  CORE PROCESSING
 # =============================================================================
 
@@ -1371,6 +1454,13 @@ def process_matches(match_list: list[dict]):
         vel = _velocity(base)
         tier = _tier(worst_delta, vel, mid_match)
 
+        # ── Maintain hot list ─────────────────────────────────────────────────
+        with _hot_lock:
+            if tier in ("WATCH", "ATTACK"):
+                _hot_matches.add(key)
+            else:
+                _hot_matches.discard(key)
+
         # ── Terminal print (compact) ──────────────────────────────────────────
         tier_tag = f"{RED}[ATTACK]{RESET}" if tier=="ATTACK" else \
                    f"{YELLOW}[WATCH]{RESET}"  if tier=="WATCH"  else ""
@@ -1408,8 +1498,11 @@ def process_matches(match_list: list[dict]):
         attack_n  = sum(1 for r in dashboard_rows if r["tier"] == "ATTACK")
         watch_n   = sum(1 for r in dashboard_rows if r["tier"] == "WATCH")
         dir_label = "↓ DOWN" if _scroll_dir == 1 else "↑ UP"
+        with _hot_lock:
+            hot_n = len(_hot_matches)
         status    = (f"🔴 {attack_n} ATTACK  🟡 {watch_n} WATCH  |  "
-                     f"{dir_label}  |  {len(baselines)} baselines")
+                     f"{dir_label}  |  {len(baselines)} baselines"
+                     + (f"  |  🔥 {hot_n} hot" if hot_n else ""))
         _dash.update_matches(dashboard_rows, status)
 
 
@@ -1498,6 +1591,10 @@ def main():
     # Start scan loop on background thread
     t = threading.Thread(target=_scan_loop, daemon=True)
     t.start()
+
+    # Start hot-match fast-rescan thread
+    ht = threading.Thread(target=_hot_scan_loop, daemon=True)
+    ht.start()
 
     # Run dashboard on main thread (required for tkinter on Windows)
     start_dashboard()
