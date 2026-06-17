@@ -35,6 +35,12 @@ except ImportError:
     CAPTURE_AVAILABLE = False
 
 try:
+    import mss
+    MSS_AVAILABLE = True
+except ImportError:
+    MSS_AVAILABLE = False
+
+try:
     import pytesseract
     pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
     OCR_AVAILABLE = True
@@ -61,6 +67,7 @@ except ImportError:
 
 SIMULATION_MODE      = False
 WINDOW_TITLE         = "ZB30"
+CAPTURE_MONITOR      = 2      # mss monitor index: 1=primary, 2=second monitor, 0=all screens
 
 SCAN_INTERVAL_SEC    = 0
 DELTA_THRESHOLD_PCT  = 12.0
@@ -874,19 +881,41 @@ def parse_sim_matches() -> list[dict]:
 
 
 # =============================================================================
-#  WINDOW CAPTURE
+#  CAPTURE  (mss monitor → pyautogui window fallback)
 # =============================================================================
 
 BLACK_THRESH = 18
 
 
-def capture_window(title: str) -> Image.Image | None:
+def capture_frame() -> Image.Image | None:
+    """Grab the source image.
+
+    Primary: mss full-screen grab of CAPTURE_MONITOR (fast, no focus steal).
+    Fallback: pyautogui window grab of WINDOW_TITLE (used if mss unavailable
+              or the requested monitor index doesn't exist).
+    """
+    if MSS_AVAILABLE:
+        try:
+            with mss.mss() as sct:
+                monitors = sct.monitors   # [0]=all, [1]=primary, [2]=second, …
+                if CAPTURE_MONITOR < len(monitors):
+                    shot = sct.grab(monitors[CAPTURE_MONITOR])
+                    return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+                print(f"{YELLOW}[WARN] Monitor {CAPTURE_MONITOR} not found "
+                      f"({len(monitors)-1} monitor(s) detected) — falling back to window capture.{RESET}")
+        except Exception as e:
+            print(f"{YELLOW}[WARN] mss capture failed ({e}) — falling back to window capture.{RESET}")
+
+    return _capture_window_fallback()
+
+
+def _capture_window_fallback() -> Image.Image | None:
     if not CAPTURE_AVAILABLE:
         return None
     wins = [w for w in gw.getAllWindows()
-            if title.lower() in w.title.lower() and w.width > 20]
+            if WINDOW_TITLE.lower() in w.title.lower() and w.width > 20]
     if not wins:
-        print(f"{YELLOW}[WARN] Window '{title}' not found.{RESET}")
+        print(f"{YELLOW}[WARN] Window '{WINDOW_TITLE}' not found.{RESET}")
         return None
     win = wins[0]
     try:
@@ -1379,7 +1408,7 @@ def scan_once():
         process_matches(match_list)
         return
 
-    img = capture_window(WINDOW_TITLE)
+    img = capture_frame()
     if img is None:
         return
 
