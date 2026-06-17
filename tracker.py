@@ -70,6 +70,7 @@ WINDOW_TITLE         = "ZB30"
 CAPTURE_MONITOR      = 2      # mss monitor index: 1=primary, 2=second monitor, 0=all screens
 
 SCAN_INTERVAL_SEC    = 0
+OCR_ROW_HEIGHT_PX    = 55     # strip height in the 2× preprocessed image; tune if lines get split
 DELTA_THRESHOLD_PCT  = 12.0
 ALERT_BEEP_FREQ      = 1200
 ALERT_BEEP_DURATION  = 600
@@ -959,23 +960,36 @@ def preprocess_for_ocr(pil_img: Image.Image) -> np.ndarray:
 
 
 def ocr_image(pil_img: Image.Image) -> list[str]:
+    """Parallel row-strip OCR — ~3-4× faster than single-pass psm 6."""
     if not OCR_AVAILABLE:
         return []
-    processed     = preprocess_for_ocr(pil_img)
-    pil_processed = Image.fromarray(processed)
-    config = (
-        "--psm 6 --oem 3 "
+
+    processed = preprocess_for_ocr(pil_img)
+    h, _      = processed.shape
+    config    = (
+        "--psm 7 --oem 3 "
         "-c tessedit_char_whitelist="
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-. "
     )
-    raw = pytesseract.image_to_string(pil_processed, config=config)
+
+    def _ocr_strip(y0: int) -> str:
+        strip = processed[y0 : min(y0 + OCR_ROW_HEIGHT_PX, h), :]
+        if strip.mean() < 8:      # skip nearly-black strips
+            return ""
+        return pytesseract.image_to_string(Image.fromarray(strip), config=config)
+
+    ys = list(range(0, h, OCR_ROW_HEIGHT_PX))
+    with ThreadPoolExecutor(max_workers=min(len(ys), 8)) as pool:
+        raw_strips = list(pool.map(_ocr_strip, ys))
+
     out = []
-    for line in raw.splitlines():
-        line = line.strip()
-        line = re.sub(r"[^\w\s\.\+\-]", " ", line)
-        line = re.sub(r"\s{2,}", " ", line).strip()
-        if line:
-            out.append(line)
+    for raw in raw_strips:
+        for line in raw.splitlines():
+            line = line.strip()
+            line = re.sub(r"[^\w\s\.\+\-]", " ", line)
+            line = re.sub(r"\s{2,}", " ", line).strip()
+            if line:
+                out.append(line)
     return out
 
 
@@ -1226,25 +1240,27 @@ ATTACK_LOCK_SEC  = 30     # seconds to hold lock-on before auto-resuming scroll
 _attack_resume_timer = None   # threading.Timer handle
 
 
-def _update_history(base: dict, prob: float):
+def _update_history(base: dict, prob1: float, prob2: float):
     """Append current reading to match history, keep last 20."""
     hist = base.setdefault("history", [])
-    hist.append((time.time(), prob))
+    hist.append((time.time(), prob1, prob2))
     if len(hist) > 20:
         hist.pop(0)
 
 
 def _velocity(base: dict) -> float:
     """Return pp/min drop rate for the worse player. Positive = dropping."""
-    h1 = [(t, p) for t, p in base.get("history", []) if p is not None]
-    if len(h1) < 2:
+    h = base.get("history", [])
+    if len(h) < 2:
         return 0.0
-    dt_min = (h1[-1][0] - h1[0][0]) / 60.0
+    dt_min = (h[-1][0] - h[0][0]) / 60.0
     if dt_min < 0.05:
         return 0.0
-    # drop = baseline prob minus most recent (positive means falling)
-    drop = base["p1_prob"] - h1[-1][1]
-    return drop / dt_min
+    if len(h[-1]) == 3:                         # (ts, prob1, prob2)
+        drop1 = base["p1_prob"] - h[-1][1]
+        drop2 = base["p2_prob"] - h[-1][2]
+        return max(drop1, drop2) / dt_min
+    return (base["p1_prob"] - h[-1][1]) / dt_min   # legacy single-prob entries
 
 
 def _tier(delta: float, velocity: float, mid_match: bool) -> str:
@@ -1347,12 +1363,10 @@ def process_matches(match_list: list[dict]):
 
         mid_match = base["quality"] in ("MID_MATCH", "WARMUP")
 
-        # ── Update history (track worst player's prob) ────────────────────────
-        worst_prob = min(prob1, prob2)   # lower = more in trouble
-        _update_history(base, worst_prob)
-
         d1  = base["p1_prob"] - prob1
         d2  = base["p2_prob"] - prob2
+        _update_history(base, prob1, prob2)
+
         worst_delta = max(d1, d2)
         vel = _velocity(base)
         tier = _tier(worst_delta, vel, mid_match)
